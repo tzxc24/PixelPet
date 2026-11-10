@@ -1,0 +1,78 @@
+menu "PixelPet firmware"
+
+choice PIXELPET_BOOT_MODE
+    prompt "Boot mode"
+    default PIXELPET_BOOT_NETWORK
+    help
+        The physical smoke modes require the separate approved pinmap gate.
+
+config PIXELPET_BOOT_NETWORK
+    bool "PixelPet WebSocket networking (requires local NVS provisioning)"
+config PIXELPET_BOOT_WIFI
+    bool "HW_PENDING: Wi-Fi association only (requires local NVS provisioning)"
+config PIXELPET_BOOT_MEMORY
+    bool "HW_PENDING: serial and PSRAM probe"
+config PIXELPET_BOOT_DISPLAY
+    bool "HW_PENDING: ST7789 color bars"
+config PIXELPET_BOOT_ANIMATION
+    bool "HW_PENDING: ST7789 local animation"
+config PIXELPET_BOOT_MICROPHONE
+    bool "HW_PENDING: INMP441 capture peak"
+config PIXELPET_BOOT_SPEAKER
+    bool "HW_PENDING: MAX98357A low-amplitude test tone"
+config PIXELPET_BOOT_TOUCH
+    bool "HW_PENDING: TTP223 state transitions"
+config PIXELPET_BOOT_MOTOR
+    bool "HW_PENDING: one 70 ms MOS motor pulse"
+endchoice
+
+config PIXELPET_SPEAKER_WIRING_CONFIRMED
+    bool "Enable speaker-only test after checking power, ground and I2S wiring"
+    depends on PIXELPET_BOOT_SPEAKER
+    default n
+    help
+        Enables only the configured speaker I2S output in the speaker smoke mode.
+        Other peripheral approval gates remain in effect.
+
+config PIXELPET_MICROPHONE_WIRING_CONFIRMED
+    bool "Enable microphone-only test after checking 3.3V, ground and I2S wiring"
+    depends on PIXELPET_BOOT_MICROPHONE
+    default n
+    help
+        Enables only the configured microphone I2S input in microphone smoke mode.
+        Connect L/R to ground for the configured left input slot.
+
+config PIXELPET_MICROPHONE_SERIAL_PCM
+    bool "Export a six-second microphone PCM capture over serial"
+    depends on PIXELPET_BOOT_MICROPHONE && PIXELPET_MICROPHONE_WIRING_CONFIRMED
+    default n
+    help
+        Records from the physical I2S microphone into PSRAM, then exports
+        indexed hexadecimal PCM lines for PC decoding and real ASR checks.
+
+config PIXELPET_NETWORK_AUDIO_CONFIRMED
+    bool "Enable network microphone and speaker after individual hardware checks"
+    depends on PIXELPET_BOOT_NETWORK
+    default n
+
+config PIXELPET_SERIAL_VOICE_CONTROL
+    bool "Start/stop/cancel voice turns with serial r/s/c commands"
+    depends on PIXELPET_NETWORK_AUDIO_CONFIRMED
+    default n
+
+config PIXELPET_NETWORK_AUDIO_GAIN_PERCENT
+    int "Network speaker PCM amplitude percentage"
+    depends on PIXELPET_NETWORK_AUDIO_CONFIRMED
+    range 10 100
+    default 25
+
+config PIXELPET_USE_ESP_SR_VAD
+    bool "Use the standalone ESP-SR WebRTC voice activity detector"
+    depends on PIXELPET_NETWORK_AUDIO_CONFIRMED
+    default n
+    help
+        Uses fixed 20 ms mono PCM16 frames at 16 kHz.
+        The official dependency is fetched by firmware/setup_esp_sr.ps1.
+        This enables VAD only; no WakeNet or neural models are loaded.
+
+endmenu

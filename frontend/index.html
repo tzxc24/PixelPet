@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#faf8f2">
+  <title>PixelPet · 小星的房间</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23edaa48' d='M14 2h4v8h10v6h-6v14l-6-6-6 6V16H4v-6h10z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/v1.css">
+  <script src="/static/js/auth.js" defer></script>
+  <script src="/static/js/pet-behavior.js?v=1" defer></script>
+  <script src="/static/js/pet.js?v=2" defer></script>
+  <script src="/static/js/app.js" defer></script>
+  <script src="/static/js/chat.js?v=3" defer></script>
+  <script src="/static/js/lip-sync.js?v=1" defer></script>
+  <script src="/static/js/audio-player.js?v=2" defer></script>
+  <script src="/static/js/wake-word.js?v=1" defer></script>
+  <script src="/static/js/runtime.js?v=3" defer></script>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <a class="brand" href="/" aria-label="PixelPet 首页"><span class="brand-star">✦</span><span>PixelPet<small>A LITTLE STAR, A LITTLE COMPANY.</small></span></a>
+      <div class="header-right"><button class="text-button" id="settings-toggle" type="button">设置</button><button class="text-button" id="diagnostics-toggle" type="button">诊断</button><span class="mode"><i></i> PC 语音桌宠</span><span class="version">V1.0 / HW PENDING</span></div>
+    </header>
+    <main>
+      <div class="intro"><div><span class="eyebrow">WELCOME TO OUR LITTLE CORNER</span><h1>今天，也有小星陪着你<span>。</span></h1><p>一颗好奇的小星星，正在学习如何成为你的伙伴。</p></div><div class="date-block"><time id="clock">--:--:--</time><span id="date">正在校准本机时间</span></div></div>
+      <div class="readiness" aria-live="polite"><span id="llm-ready">AI 检查中</span><span id="asr-ready">ASR 检查中</span><span id="tts-ready">TTS 检查中</span><span>ESP32 · HW_PENDING</span></div>
+      <div class="room-grid">
+        <section class="pet-room" aria-label="小星的像素房间">
+          <div class="room-top"><span class="room-label"><i></i> 小星的房间</span><span id="connection" role="status">正在连接本地服务…</span></div>
+          <div class="stage">
+            <span class="scene-label">MAKE YOURSELF AT HOME</span>
+            <span class="sparkle s1">✧</span><span class="sparkle s2">+</span><span class="sparkle s3">✧</span>
+            <div class="speech" id="pet-speech">嗨，主人！今天想做点什么？</div>
+            <canvas id="pet" width="240" height="240" role="img" aria-label="小星：待机，眨眼和呼吸"></canvas>
+            <span class="floor-line"></span><span class="scene-coordinate">X: 120 / Y: 120</span><span class="scene-tag">★ HOME SWEET HOME</span>
+          </div>
+          <div class="pet-caption"><div><span class="name">小星 <span>✦</span></span><span class="pet-subtitle">你的口袋星光</span></div><div class="state-pill"><i></i><span id="state-label">待机</span><code id="state-code">IDLE</code></div></div>
+          <div class="emotion-line"><span>此刻心情 <b id="emotion">平静 · normal</b></span><span id="recording">录音模拟未开始</span></div>
+        </section>
+        <section class="chat-panel" aria-label="小星对话">
+          <div class="panel-heading"><div><span class="eyebrow">LITTLE CONVERSATIONS</span><h2>和小星说说话</h2></div><button class="text-button" id="clear-chat" type="button">清空会话</button></div>
+          <div class="demo-note" id="chat-mode" role="status">正在确认模型模式…</div>
+          <div class="conversation-tools"><label class="sr-only" for="conversation-select">历史会话</label><select id="conversation-select" aria-label="历史会话"></select><button type="button" id="new-chat">＋ 新对话</button><button type="button" id="delete-chat">删除</button></div>
+          <div class="chat-footnote"><label><input type="checkbox" id="follow-device-chat" checked> 跟随实物语音会话</label> <button type="button" id="refresh-chat-history">刷新聊天记录</button><span id="history-sync-status" role="status"></span></div>
+          <div class="chat-log" id="chat-log" role="log" aria-live="polite" aria-relevant="additions"></div>
+          <div class="chat-bottom"><div class="suggestions"><button type="button" data-message="你好，小星！">打个招呼</button><button type="button" data-message="今天有点累了">分享今天</button><button type="button" id="open-memories">♡ 记忆本</button></div><form id="chat-form"><label class="sr-only" for="message">给小星的消息</label><input id="message" placeholder="把今天的小事告诉我…" maxlength="2000" autocomplete="off" required><button type="submit" aria-label="发送消息">↑</button></form><p class="chat-footnote">聊天保存在本机 SQLite · 云模型模式会发送相关上下文</p></div>
+        </section>
+      </div>
+      <section class="voice-dock" aria-label="真实电脑语音">
+        <div><span class="eyebrow">LET'S TALK, FOR REAL</span><h2>听见你，也让你听见小星</h2><p>麦克风 → 本地识别 → DeepSeek → 电脑发声 · 原始录音不长期保存</p></div>
+        <div class="voice-controls"><button id="voice-start" type="button">● 开始说话</button><button id="voice-stop" type="button" disabled>■ 结束并发送</button><button id="voice-play" type="button">▷ 试听小星</button><button id="voice-cancel" type="button">停止 / 取消</button><button id="wake-toggle" type="button" aria-pressed="false">开启「小星」唤醒</button></div>
+        <p id="wake-status" role="status">语音唤醒默认关闭。开启后，待机片段仅提交给本机 Whisper 检测。</p>
+        <div class="voice-meter-row"><meter id="voice-level" min="0" max="1" value="0" aria-label="麦克风音量"></meter><span id="voice-time">00:00</span><code id="audio-state" aria-live="polite">IDLE</code><span id="voice-status" role="status">点击“试听小星”测试声音，点击“开始说话”允许麦克风。</span><label><input id="auto-speak" type="checkbox" checked>回复自动发声</label></div>
+      </section>
+      <section class="workbench" aria-label="交互与表情测试">
+        <div class="bench-heading"><div><span class="eyebrow">PLAY A LITTLE</span><h2>认识小星的每一面</h2></div><span>点击表情，看看它的小动作</span></div>
+        <div class="expression-grid" id="expressions">
+          <button type="button" data-state="IDLE" aria-pressed="true"><span>·ᴗ·</span>待机<small>IDLE</small></button>
+          <button type="button" data-state="HAPPY" aria-pressed="false"><span>^ᴗ^</span>开心<small>HAPPY</small></button>
+          <button type="button" data-state="LISTENING" aria-pressed="false"><span>◉‿◉</span>聆听<small>LISTENING</small></button>
+          <button type="button" data-state="THINKING" aria-pressed="false"><span>·_· ?</span>思考<small>THINKING</small></button>
+          <button type="button" data-state="SPEAKING" aria-pressed="false"><span>·Ｏ·</span>说话<small>SPEAKING</small></button>
+          <button type="button" data-state="SHY" aria-pressed="false"><span>˶ᴗ˶</span>害羞<small>SHY</small></button>
+          <button type="button" data-state="SLEEP" aria-pressed="false"><span>－.－</span>睡觉<small>SLEEP</small></button>
+          <button type="button" data-state="SURPRISED" aria-pressed="false"><span>! o !</span>惊讶<small>SURPRISED</small></button>
+          <button type="button" data-state="ANNOYED" aria-pressed="false"><span>＞_＜</span>气鼓鼓<small>ANNOYED</small></button>
+          <button type="button" data-state="ERROR" aria-pressed="false"><span>×_×</span>出错<small>ERROR</small></button>
+        </div>
+        <div class="hardware-row"><div class="hardware-title"><strong>互动试验台</strong><small>全部为模拟事件</small></div><div class="event-buttons"><button type="button" data-event="touch_start">✧ 摸摸小星</button><button type="button" data-event="touch_end">松开触摸</button><button type="button" data-event="audio_start" id="audio-start">◎ 开始录音</button><button type="button" data-event="audio_end" id="audio-end" disabled>■ 结束录音</button><button type="button" data-event="audio_play">▷ 模拟播放</button></div></div>
+        <div class="device-row"><div class="device-links"><button type="button" data-event="wifi_connected" id="wifi">Wi-Fi <span>未模拟连接</span></button><button type="button" data-event="ble_connected" id="ble">BLE <span>未模拟连接</span></button></div><span class="event-log" id="event-log" role="status">等待你的第一个互动</span></div>
+        <div class="touch-row"><button type="button" id="touch-record" aria-pressed="false">点按录音，再点发送</button><button type="button" id="touch-pad">按住小星：长按录音，松开发送</button><button type="button" data-touch="tap">单击</button><button type="button" data-touch="double_tap">双击</button><button type="button" data-haptic="short">震动短脉冲</button><button type="button" data-haptic="double">双脉冲</button><button type="button" data-haptic="long">长脉冲</button><span id="haptic-status">触觉为模拟</span><button type="button" id="export-frame">导出 RGB565</button></div>
+      </section>
+      <section class="workbench" id="settings-panel" hidden aria-label="小星设置"><div class="bench-heading"><h2>小星的设置</h2><button type="button" class="text-button" id="close-settings">收起</button></div><form id="settings-form" class="settings-grid">
+        <label>名字<input name="name" maxlength="40" value="小星"></label><label>性格<input name="personality" maxlength="100" value="cute"></label>
+        <label>音量 <output id="volume-value">100%</output><input name="volume" type="range" min="0" max="1" step="0.05" value="1"></label><label>语速 <output id="rate-value">1.00 × (+0%)</output><input name="rate" type="range" min="0.8" max="1.2" step="0.01" value="1"></label><label>音高微调 <output id="pitch-value">+0 Hz</output><input name="pitch_hz" type="range" min="-12" max="12" step="1" value="0"></label>
+        <label>语音输出<select name="tts_provider"><option value="edge">Edge 自然语音（在线 · 默认）</option><option value="sapi">Windows SAPI（离线兼容）</option><option value="mock">Mock（明确测试）</option><option value="browser">浏览器语音合成</option></select></label><label>声音<select name="voice"><option value="">默认中文声音</option></select></label>
+        <label>麦克风<select name="microphone_id"><option value="">系统默认（授权后显示设备）</option></select></label><label>识别方式<select name="asr_provider"><option value="local_whisper">本地 Whisper CPU</option><option value="baidu_asr">百度语音识别（在线）</option><option value="disabled">关闭语音识别</option></select></label>
+        <label>亮度（模拟）<input name="brightness" type="range" min="0.1" max="1" step="0.05"></label><label>动画 FPS<input name="animation_fps" type="number" min="1" max="30" value="12"></label><label>触觉强度（模拟）<input name="haptic_strength" type="range" min="0" max="1" step="0.1"></label>
+        <label><input name="haptics" type="checkbox">允许模拟震动</label><label><input name="proactive_enabled" type="checkbox">允许限频主动问候（默认关闭）</label>
+        <label>安静时段开始<input name="quiet_start" type="time" value="22:00"></label><label>安静时段结束<input name="quiet_end" type="time" value="08:00"></label>
+        <label>时区<input name="time_zone" value="Asia/Shanghai"></label><label>时制<select name="time_format"><option value="24">24 小时</option><option value="12">12 小时</option></select></label>
+        <label>每日提醒上限<input name="daily_limit" type="number" min="0" max="100" value="3"></label><label>模型名称<input name="llm_model" value="deepseek-flash" maxlength="100"></label>
+        <div class="speech-actions"><button type="button" id="voice-preview">▷ 试听当前声音</button><button type="button" id="voice-defaults">恢复语音默认值</button><a href="/voice-test" target="_blank" rel="noopener">打开声音对比页 ↗</a></div><button type="submit">保存其他设置</button><span id="settings-status" role="status"></span>
+      </form><p class="memory-hint">DeepSeek 接收聊天文本和相关记忆；Edge 自然语音会将回复文本发送给 Microsoft，无需 API Key；Whisper 与 SAPI 在本机运行。语音控制自动保存，其余设置点击保存。浏览器合成取决于系统/浏览器声音，可能使用在线声音。安静时段内自动播放和模拟触觉关闭。</p></section>
+      <section class="workbench" id="diagnostics-panel" hidden aria-label="诊断"><div class="bench-heading"><h2>设备与事件诊断</h2><button type="button" id="refresh-diagnostics">刷新</button></div><pre id="diagnostics-output">等待诊断</pre><h3>本地提醒</h3><form id="reminder-form"><label class="sr-only" for="reminder-text">提醒内容</label><input id="reminder-text" placeholder="提醒内容" maxlength="500" required><label class="sr-only" for="reminder-time">提醒时间（本机时区）</label><input id="reminder-time" type="datetime-local" title="以电脑本机时区输入，与宠物显示时区可不同" required><button type="submit">添加</button></form><div id="reminder-list"></div><p class="memory-hint">提醒时间按电脑本机时区输入；仅在本服务和页面运行时显示。服务关闭不通知，超过 24 小时的过期提醒不补发。安静时段和次数限制会推迟提醒。</p></section>
+      <p id="error" class="error" role="alert" hidden></p>
+      <p id="chat-error" class="error" role="alert" hidden></p>
+      <section id="memory-panel" class="workbench memory-panel" aria-label="长期记忆本" hidden>
+        <div class="bench-heading"><div><span class="eyebrow">THINGS I REMEMBER</span><h2>小星的记忆本</h2></div><button id="close-memories" class="text-button" type="button">收起</button></div>
+        <p class="memory-hint">只保留重要事实；删除会话不会删除记忆。敏感内容不会自动提取为长期记忆，原聊天仍会保存在本机。</p>
+        <p id="memory-sync-status" class="memory-hint" role="status">展开时自动同步；完整对话请查看上方聊天记录。</p>
+        <div class="memory-search"><label class="sr-only" for="memory-query">检索记忆</label><input id="memory-query" placeholder="搜索项目、爱好、重要的事情…" maxlength="2000"><button type="button" id="search-memories">搜索</button><button type="button" id="all-memories">全部</button></div>
+        <div class="memory-actions"><a href="/api/memories/export" download="pixelpet-memories.json">导出记忆 JSON</a><button type="button" id="clear-all-memories">清空全部记忆</button></div>
+        <div id="memory-list" aria-live="polite"></div>
+        <form id="memory-form"><label class="sr-only" for="memory-category">记忆分类</label><select id="memory-category"><option value="explicit">明确记住</option><option value="basic">基本信息</option><option value="interest">兴趣爱好</option><option value="work">学习工作</option><option value="project">长期项目</option><option value="event">重要事件</option><option value="preference">个人偏好</option></select><label class="sr-only" for="memory-content">记忆内容</label><input id="memory-content" maxlength="1000" placeholder="想让我记住什么？" required><button type="submit" aria-label="新增记忆">＋</button></form>
+      </section>
+    </main>
+    <footer><span>✦ 小小像素，慢慢长大。</span><span>LOCAL FIRST <i>·</i> NO HARDWARE NEEDED</span></footer>
+  </div>
+</body>
+</html>

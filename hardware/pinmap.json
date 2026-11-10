@@ -1,0 +1,14 @@
+{
+ "version":"1.0",
+ "status":"SOFTWARE_PINMAP_FROZEN / PHYSICAL_PINOUT_UNVERIFIED",
+ "provenance":"Derived from E:/Downloads/PixelPet_V1_接线与GPIO定义.md; companion original pinmap.json/header were not present",
+ "hardware_enabled":false,
+ "electrical_reviewed":false,
+ "display_csf_isolated_verified":false,
+ "motor_supply_and_threshold_verified":false,
+ "pins":{"mic_bclk":4,"mic_ws":5,"mic_din":6,"speaker_bclk":7,"speaker_ws":8,"speaker_dout":9,"display_sck":14,"display_mosi":15,"display_rst":16,"display_dc":17,"display_cs":18,"touch":13,"motor":21,"display_bl":-1,"display_font_cs":-1},
+ "reserved":{"display_bl":10,"future_i2c_sda":11,"future_i2c_scl":12,"future_adc_1":1,"future_adc_2":2},
+ "display":{"width":240,"height":240,"offset_x":0,"offset_y":0,"bgr":false,"spi_hz":10000000},
+ "audio":{"input_sample_rate":16000,"input_slot_bits":32,"output_sample_rate":24000,"output_slot_bits":16},
+ "touch":{"active_high":true,"debounce_ms":40,"long_press_ms":650}
+}

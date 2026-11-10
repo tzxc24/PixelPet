@@ -1,0 +1,61 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "event_id": {
+      "maxLength": 128,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "device_id": {
+      "default": "pixelpet-sim-001",
+      "maxLength": 80,
+      "pattern": "^[a-zA-Z0-9_.-]+$",
+      "title": "Device Id",
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "touch.touch_down",
+        "touch.touch_up",
+        "touch.tap",
+        "touch.double_tap",
+        "touch.long_press",
+        "pet.state",
+        "pet.emotion",
+        "audio.record_start",
+        "audio.record_stop",
+        "audio.speak_start",
+        "audio.speak_end",
+        "haptic.pattern",
+        "haptic.pulse",
+        "device.connected",
+        "device.disconnected",
+        "device.error",
+        "clock.tick"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "title": "Event",
+  "type": "object"
+}

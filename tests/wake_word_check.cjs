@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const {isWakeWord, shouldFinish} = require('../frontend/js/wake-word.js');
+for (const text of ['小星', '你好，小星！', '嘿小星', '小星小星']) assert.equal(isWakeWord(text), true);
+for (const text of ['小心', '星星', '我刚才叫了小星', '小星你好我有一个问题', '']) assert.equal(isWakeWord(text), false);
+assert.equal(shouldFinish(5000, null), false);
+assert.equal(shouldFinish(6000, null), true);
+assert.equal(shouldFinish(2200, 1300), false);
+assert.equal(shouldFinish(2600, 1300), true);
+assert.equal(shouldFinish(15000, 14999), true);
+console.log('Wake phrase boundaries and recording deadlines PASS');

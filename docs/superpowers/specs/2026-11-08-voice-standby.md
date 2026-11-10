@@ -1,0 +1,4 @@
+# Voice standby and local wake
+Approved intent: “休息吧” enters standby, “你好小星” resumes continuous conversation.
+The board performs VAD. Standby utterances travel only over the authenticated LAN PCM socket to PC local Whisper, never Baidu/DeepSeek and never SQLite. Nonmatching clips are discarded. Exact normalized phrase matching prevents arbitrary conversation from waking the pet; 小心 is accepted as a documented ASR homophone only in the explicit 你好小心 phrase. Active rest commands are matched strictly to avoid quoted discussions triggering standby.
+Protocol adds record.start purpose=wake and playback.start dialog_state; wake.result handles nonmatches. Old conversation clients remain supported. Rest/wake replies use existing TTS, with state delivered before playback so synthesis failure still preserves the transition. c fully disables listening. Restart remains off. No AEC, on-chip word model, or independent operation claim.

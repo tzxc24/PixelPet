@@ -1,0 +1,10 @@
+{
+  "status": "HW_PENDING",
+  "transport": "BLE GATT provisioning simulation contract only",
+  "service_uuid": "73320001-78c0-4b60-a116-a7dc76582200",
+  "characteristics": {
+    "network_config": {"uuid":"73320002-78c0-4b60-a116-a7dc76582200","write":"encrypted authenticated connection only","value":{"version":1,"ssid":"","password":"","gateway_url":"","access_token":""},"max_bytes":2048},
+    "status": {"uuid":"73320003-78c0-4b60-a116-a7dc76582200","read_notify":true,"value":{"state":"HW_PENDING","network_connected":false}}
+  },
+  "constraints":["No BLE stack implemented in this scaffold","Never echo credential values in status or logs","Physical pairing and storage threat model require real device review"]
+}

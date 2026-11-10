@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PixelPet 设备联调</title>
+  <script src="/static/js/auth.js" defer></script>
+  <script src="/static/js/device-debug.js" defer></script>
+</head>
+<body><main>
+  <a href="/">返回小星</a>
+  <h1>PixelPet 设备联调</h1>
+  <p>下方按钮模拟控制事件。设备语音使用独立的 PCM WebSocket。</p>
+  <button data-event="touch.tap">单击</button>
+  <button data-event="touch.double_tap">双击</button>
+  <button data-event="haptic.pattern">短震</button>
+  <button data-event="pet.emotion">开心</button>
+  <button data-event="audio.record_start">模拟开始录音</button>
+  <button data-event="audio.record_stop">模拟结束录音</button>
+  <button data-event="audio.speak_end">模拟结束播放</button>
+  <p id="status" role="status"></p>
+  <pre id="devices"></pre>
+</main></body></html>

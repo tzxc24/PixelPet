@@ -1,0 +1,22 @@
+# PROVISIONAL / 待实物确认 — not a wiring diagram
+status: HW_PENDING
+hardware_approved: false
+board: ESP32-S3-N16R8-unverified
+# -1 means electrically unassigned. Independent I2S RX/TX clocks.
+pins:
+  display_sck: -1
+  display_mosi: -1
+  display_cs: -1
+  display_dc: -1
+  display_rst: -1
+  display_bl: -1
+  display_font_cs: -1
+  mic_bclk: -1
+  mic_ws: -1
+  mic_din: -1
+  speaker_bclk: -1
+  speaker_ws: -1
+  speaker_dout: -1
+  touch: -1
+  motor: -1
+# The conservative software guard is not a substitute for a board schematic.

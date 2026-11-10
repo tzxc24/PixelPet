@@ -1,0 +1,6 @@
+# Compatibility manifest: actual software mapping moved to the single JSON source.
+source: hardware/pinmap.json
+generated_header: firmware/main/board/pixelpet_pin_config.h
+status: SOFTWARE_PINMAP_FROZEN / PHYSICAL_PINOUT_UNVERIFIED
+hardware_enabled: false
+# This file deliberately contains no GPIO constants. Run scripts/generate_pinmap.py --check.
