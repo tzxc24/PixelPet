@@ -5,13 +5,15 @@ import re
 import io
 import struct
 import wave
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from backend.preferences.scheduler import parse_voice_reminder
 from uuid import uuid4
 from backend.speech.service import SpeechError
 from backend.speech.commands import is_rest_command, is_wake_command, normalize, assistant_rest_commitment
 from backend.ai.schemas import ModelReply
 from backend.ai.provider import LLMError
 from backend.access import access_error
+import numpy as np
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from backend.events import Event
@@ -22,6 +24,16 @@ VOICE_HEADER = struct.Struct('!16sI')
 VOICE_CHUNK = 4096
 VOICE_LIMIT = 16000 * 2 * 20
 VOICE_RECORD_DEADLINE = 25
+
+
+def device_playback_pcm(data: bytes, peak: float) -> bytes:
+    """Use available PCM headroom for the desk pet's speaker."""
+    peak_limit = .85
+    if not 0 < peak < peak_limit:
+        return data
+    gain = min(2.0, peak_limit / peak)
+    samples = np.frombuffer(data, dtype='<i2')
+    return np.rint(samples * gain).astype('<i2').tobytes()
 
 
 @router.get('/api/devices/voice/status')
@@ -57,6 +69,9 @@ async def voice_socket(ws: WebSocket):
     sequence = 0
     worker = None
     welcomed = False
+    supports_reminders = False
+    offered_reminder = None
+    played_reminder = None
     record_deadline = None
     clock = asyncio.get_running_loop().time
 
@@ -64,6 +79,26 @@ async def voice_socket(ws: WebSocket):
         if kind == 'error':
             metrics['last_error'] = fields.get('code')
         await ws.send_json(dict(type=kind, **fields))
+
+    async def synthesize(text, emotion):
+        prefs = app.preferences.get()
+        provider = prefs.tts_provider if prefs.tts_provider != 'browser' else 'edge'
+        return await app.speech.synthesize_device(
+            text, provider=provider, voice=prefs.voice if provider == prefs.tts_provider else None,
+            emotion=emotion, rate_percent=round((prefs.rate-1)*100),
+            volume_percent=round((prefs.volume-1)*100), pitch_hz=prefs.pitch_hz,
+            output_format='device_pcm', sample_rate=24000)
+
+    async def send_audio(session_id, audio, **fields):
+        playback = device_playback_pcm(audio.data, audio.peak)
+        await reply('playback.start', session_id=session_id, sample_rate=audio.sample_rate,
+                    channels=audio.channels, format=audio.codec, byte_count=len(playback), **fields)
+        identity = bytes.fromhex(session_id)
+        for index, offset in enumerate(range(0, len(playback), VOICE_CHUNK)):
+            chunk = playback[offset:offset+VOICE_CHUNK]
+            await ws.send_bytes(VOICE_HEADER.pack(identity, index) + chunk)
+            metrics['downloaded'] += len(chunk)
+        await reply('playback.end', session_id=session_id)
 
     async def process(session_id, samples, conversation_id, purpose):
         turn = None
@@ -87,8 +122,9 @@ async def voice_socket(ws: WebSocket):
                     await reply('wake.result', session_id=session_id, dialog_state='standby')
                     return
             else:
-                transcript = await app.speech.transcribe(output.getvalue(), 'audio/wav')
+                transcript = await app.speech.transcribe_device(output.getvalue(), 'audio/wav')
             metrics['asr_ms'] = transcript.get('elapsed_ms')
+            metrics['asr_model'] = transcript.get('model')
             dialog_state = 'active'
             cid = conversation_id
             if purpose == 'wake':
@@ -106,11 +142,27 @@ async def voice_socket(ws: WebSocket):
                 metrics['dialog_state'] = 'active'
                 await reply('dialog.state', session_id=session_id, dialog_state='active')
             else:
-                turn = app.chat.begin(transcript['text'], conversation_id)
+                turn = app.chat.begin(transcript['text'], conversation_id, spoken=True)
                 cid = turn.cid
                 metrics['conversation_id'] = cid
                 result = None
-                if is_rest_command(transcript['text']):
+                reminder = parse_voice_reminder(transcript['text']) if supports_reminders else None
+                if reminder is not None:
+                    minutes, content = reminder
+                    if not 1 <= minutes <= 1440:
+                        text = '请说一个一到一千四百四十分钟之间的时间。'
+                    else:
+                        due = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+                        try:
+                            app.scheduler.create(content or '时间到了。', due, device_id=device)
+                            text = f'好，{minutes}分钟后提醒你。'
+                        except ValueError:
+                            text = '提醒没有设好，提醒列表已满。'
+                    result = {'reply': text, 'emotion': 'normal'}
+                    app.store.finish_message(turn.cid, turn.mid, ModelReply(**result, action='speak'), 'device_control')
+                    app.chat.active.discard(turn.cid)
+                    turn.active = False
+                elif is_rest_command(transcript['text']):
                     dialog_state = 'standby'
                     metrics['dialog_state'] = 'standby'
                     result = {'reply': '好，我先休息啦。想聊天时叫我“你好小星”。', 'emotion': 'sleepy'}
@@ -129,18 +181,11 @@ async def voice_socket(ws: WebSocket):
                 dialog_state='standby'
                 metrics['dialog_state']='standby'
                 await reply('dialog.state', session_id=session_id, dialog_state='standby')
-            prefs = app.preferences.get()
-            provider = prefs.tts_provider if prefs.tts_provider != 'browser' else 'edge'
             metrics.update(result.get('timings', {}))
             tts_started = loop.time()
             for attempt in range(2):
                 try:
-                    audio = await app.speech.natural.synthesize(
-                        result['reply'], provider=provider,
-                        voice=prefs.voice if provider == prefs.tts_provider else None,
-                        emotion=result['emotion'], rate_percent=round((prefs.rate-1)*100),
-                        volume_percent=round((prefs.volume-1)*100), pitch_hz=prefs.pitch_hz,
-                        output_format='device_pcm', sample_rate=24000)
+                    audio = await synthesize(result['reply'], result['emotion'])
                     break
                 except SpeechError as exc:
                     if attempt or exc.code not in ('tts_network', 'tts_timeout'):
@@ -149,17 +194,10 @@ async def voice_socket(ws: WebSocket):
                     await asyncio.sleep(1)
             metrics.update(state='sending', tts_ms=round((loop.time()-tts_started)*1000),
                            reply_ms=round((loop.time()-started)*1000))
-            await reply('playback.start', session_id=session_id, conversation_id=cid,
-                        dialog_state=dialog_state,
-                        sample_rate=audio.sample_rate, channels=audio.channels, format=audio.codec,
-                        emotion=result['emotion'], text=result['reply'][:500], byte_count=len(audio.data),
-                        timings={key: value for key, value in metrics.items() if key.endswith('_ms')})
-            identity = bytes.fromhex(session_id)
-            for index, offset in enumerate(range(0, len(audio.data), VOICE_CHUNK)):
-                chunk = audio.data[offset:offset+VOICE_CHUNK]
-                await ws.send_bytes(VOICE_HEADER.pack(identity, index) + chunk)
-                metrics['downloaded'] += len(chunk)
-            await reply('playback.end', session_id=session_id)
+            metrics['tts_provider'] = audio.provider
+            await send_audio(session_id, audio, conversation_id=cid, dialog_state=dialog_state,
+                             emotion=result['emotion'], text=result['reply'][:500],
+                             timings={key: value for key, value in metrics.items() if key.endswith('_ms')})
         except (SpeechError, LLMError) as exc:
             await reply('error', code=exc.code, session_id=session_id)
         except asyncio.CancelledError:
@@ -237,6 +275,7 @@ async def voice_socket(ws: WebSocket):
                 kind = None
             if kind == 'hello' and not welcomed:
                 welcomed = True
+                supports_reminders = msg.get('reminders') is True
                 firmware = msg.get('firmware_version')
                 if isinstance(firmware, str) and re.fullmatch(r'[\w.+-]{1,40}', firmware, re.ASCII):
                     metrics['firmware_version'] = firmware
@@ -246,6 +285,29 @@ async def voice_socket(ws: WebSocket):
             elif welcomed and kind == 'heartbeat':
                 metrics['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
                 await reply('heartbeat')
+            elif welcomed and supports_reminders and kind == 'reminder.poll' and session is None:
+                item = app.scheduler.next_device_reminder(device)
+                offered_reminder = item['id'] if item else None
+                if item:
+                    await reply('reminder.ready', session_id=offered_reminder)
+                else:
+                    await reply('reminder.none')
+            elif welcomed and supports_reminders and kind == 'reminder.play' and session is None:
+                item = app.scheduler.next_device_reminder(device)
+                if not item or not offered_reminder or offered_reminder != item['id'] or msg.get('session_id') != offered_reminder:
+                    await reply('reminder.none')
+                    continue
+                text = '提醒你，' + item['text']
+                try:
+                    audio = await asyncio.wait_for(synthesize(text, 'normal'), timeout=20)
+                    await send_audio(offered_reminder, audio)
+                    played_reminder = offered_reminder
+                except (SpeechError, asyncio.TimeoutError):
+                    await reply('reminder.none')
+            elif welcomed and supports_reminders and kind == 'reminder.ack' and played_reminder and msg.get('session_id') == played_reminder:
+                app.scheduler.ack_device_reminder(device, played_reminder)
+                offered_reminder = played_reminder = None
+                await reply('reminder.ack')
             elif welcomed and kind == 'record.start' and session is None:
                 if app.preferences.get().asr_provider == 'disabled':
                     await reply('error', code='asr_disabled')

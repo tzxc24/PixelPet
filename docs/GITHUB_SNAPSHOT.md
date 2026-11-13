@@ -1,6 +1,23 @@
 # PixelPet V1.2-RC2 当前版本快照
 
-整理日期：2026-11-10。此仓库保存当前工程源码，不表示所有硬件与唤醒场景已验收。
+整理日期：2026-11-13。
+
+## 云端语音版
+
+- ESP32-S3 可直接连接部署在服务器上的 PixelPet 后端，上电后连续监听，播完自动恢复收音。
+- 支持百度语音识别、DeepSeek Flash 和 Edge 晓伊。语音回复按问题需要展开，可讲完整的中国寓言。
+- 「现在几点」按后端设置的时区直接报时。「五分钟后提醒我喝水」由服务器保存，到期后设备在空闲时主动播报。
+- 设备先缓冲完整音频再播放。播报期间暂停收音；到期时正在对话的提醒会等到设备空闲。语音提醒内容宜用短句。
+- 更新时先部署后端，再更新固件。下面的可选配置只适用于已核对麦克风和扬声器接线的 ESP32-S3 板卡。设备联网参数通过 NVS 单独设置。
+
+在已配置 ESP-IDF v6.1 的 Windows 项目环境中构建：
+
+```powershell
+Copy-Item firmware/pixelpet_s3/sdkconfig.continuous.defaults tmp/sdkconfig-continuous
+powershell -NoProfile -ExecutionPolicy Bypass -File firmware/build.ps1 -SdkConfig tmp/sdkconfig-continuous
+```
+
+构建与接线细节见 [固件构建](firmware_build.md) 和 [固件联网说明](../firmware/pixelpet_s3/README.md)。
 
 ## 主要内容
 
@@ -8,11 +25,11 @@
 - DeepSeek 对话、百度语音识别、Edge TTS 与 Mock 测试模式。
 - SQLite 会话、完整消息记录及长期记忆；每轮发送所有已保存会话的历史，超限明确报错。
 - ESP32-S3 的独立 PCM WebSocket 语音通道、VirtualESP32 和固件框架。
-- 语音休息与本地关键词唤醒。当前设备待机采用电脑上的 Sherpa-ONNX，仍需要电脑后端及局域网。
+- 语音休息与本地关键词唤醒。旧版的待机关键词由后端上的 Sherpa-ONNX 检测。
 
 ## 当前验证与限制
 
-- 本次上传前 Python 测试 **260 项通过**，C++ 主机测试 **11 项通过**。
+- RC2 初始快照记录了 260 项 Python 测试和 11 项 C++ 主机测试通过。
 - 麦克风采集、喇叭播放、连续问答和进入待机已有实物验证记录。
 - 本地唤醒检测已有命中记录，但背景噪声下的稳定性仍在联调，不承诺每次可靠唤醒。
 - 当前音频分段上传；背景持续说话时可能等到约 15 秒录音上限后才检测唤醒词。

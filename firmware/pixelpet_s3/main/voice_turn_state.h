@@ -9,6 +9,8 @@ inline bool voice_turn_uses_cues(VoiceTrigger trigger) {
 }
 
 enum class CaptureDecision { Continue, Send, Cancel };
+inline constexpr int continuous_silence_ms = 1200;
+inline constexpr int standby_silence_ms = 1800;
 
 class VoiceTurnState {
     enum class Phase { Idle, Capture, Thinking, Playback };
@@ -17,11 +19,13 @@ class VoiceTurnState {
     int64_t started_ = 0;
     int64_t last_speech_ = -1;
     int64_t first_speech_ = -1;
+    bool standby_ = false;
 
 public:
-    bool start(VoiceTrigger trigger, int64_t now) {
+    bool start(VoiceTrigger trigger, int64_t now, bool standby = false) {
         if (phase_ != Phase::Idle) return false;
         trigger_ = trigger;
+        standby_ = standby;
         started_ = now;
         last_speech_ = -1;
         first_speech_ = -1;
@@ -39,7 +43,7 @@ public:
         }
         if (trigger_ == VoiceTrigger::Continuous) {
             if (first_speech_ < 0) return CaptureDecision::Continue;
-            return now-first_speech_ >= 15000 || now-last_speech_ >= 1800
+            return now-first_speech_ >= 15000 || now-last_speech_ >= (standby_ ? standby_silence_ms : continuous_silence_ms)
                 ? CaptureDecision::Send : CaptureDecision::Continue;
         }
         const auto no_speech_timeout = trigger_ == VoiceTrigger::Automatic ? 8000 : 6000;

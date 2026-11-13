@@ -118,3 +118,22 @@ def test_sqlite_backup_restricts_destination_and_preserves_data(tmp_path):
         backup_database(source, target, project_root=root)
     with pytest.raises(ValueError):
         backup_database(source, tmp_path / 'elsewhere.sqlite3', project_root=root)
+
+
+def test_unrelated_settings_preserve_configured_model(tmp_path):
+    from fastapi.testclient import TestClient
+    from backend.core.config import Settings
+    from backend.main import create_app
+
+    settings = Settings(llm_mode='openai', llm_provider='openai',
+                        llm_base_url='http://127.0.0.1:9/v1',
+                        llm_api_key='fake-test-key', llm_model='configured-model')
+    path = tmp_path / 'configured-model.sqlite3'
+    with TestClient(create_app(database_path=path, settings=settings)) as client:
+        assert client.get('/api/pet/settings').json()['llm_model'] == 'configured-model'
+        reply = client.patch('/api/pet/settings', json={'volume': .8})
+        assert reply.status_code == 200
+        assert reply.json()['llm_model'] == 'configured-model'
+        assert client.get('/api/diagnostics').json()['llm']['model'] == 'configured-model'
+    with TestClient(create_app(database_path=path, settings=settings)) as client:
+        assert client.get('/api/diagnostics').json()['llm']['model'] == 'configured-model'

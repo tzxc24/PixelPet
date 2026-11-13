@@ -52,8 +52,9 @@ class PetPreferences(BaseModel):
 
 
 class PreferencesService:
-    def __init__(self, engine):
+    def __init__(self, engine, *, default_model=""):
         self.engine = engine
+        self.defaults = {"llm_model": default_model} if default_model else {}
 
     def read_json(self, key, default):
         with self.engine.connect() as connection:
@@ -77,7 +78,7 @@ class PreferencesService:
                 raise
 
     def get(self):
-        return PetPreferences.model_validate(self.read_json('preferences.v1', {}))
+        return PetPreferences.model_validate(self.defaults | self.read_json('preferences.v1', {}))
 
     def is_quiet(self, now=None):
         value = self.get()
@@ -88,7 +89,7 @@ class PreferencesService:
 
     def update(self, changes):
         def apply(state):
-            validated = PetPreferences.model_validate(state | changes)
+            validated = PetPreferences.model_validate(self.defaults | state | changes)
             state.clear()
             state.update(validated.model_dump())
             return validated

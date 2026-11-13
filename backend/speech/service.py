@@ -59,8 +59,9 @@ class LocalWhisper:
     """Load only on first transcription; all model files live beneath project tmp."""
     name = 'local_whisper'
 
-    def __init__(self, settings):
-        self.model_name = getattr(settings, 'asr_model', 'tiny')
+    def __init__(self, settings, *, model_name=None, beam_size=5):
+        self.model_name = model_name or getattr(settings, 'asr_model', 'tiny')
+        self.beam_size = beam_size
         if self.model_name not in {'tiny', 'base', 'small', 'medium', 'large-v3', 'tiny.en', 'base.en', 'small.en'}:
             raise ValueError('Unsupported ASR model name')
         self.model_dir = ROOT / 'tmp' / 'models' / ('faster-whisper-' + self.model_name)
@@ -90,10 +91,14 @@ class LocalWhisper:
                 hints={'hotwords':'你好小星 小星小星'} if wake else {}
                 # The physical wake clip is already endpointed by ESP-SR. A
                 # second Silero gate can discard a short, quiet proper name.
-                segments, info = self.model.transcribe(samples, beam_size=5, vad_filter=not wake, condition_on_previous_text=False, language='zh', **hints)
+                segments, info = self.model.transcribe(samples, beam_size=self.beam_size, vad_filter=not wake, condition_on_previous_text=False, language='zh', **hints)
                 words=[]
                 evidence=[]
+                min_logprob = None
                 for segment in segments:
+                    if self.beam_size != 5:
+                        score = segment.avg_logprob
+                        min_logprob = score if min_logprob is None else min(min_logprob, score)
                     if wake:
                         evidence.append({'logprob':round(segment.avg_logprob,3),'no_speech':round(segment.no_speech_prob,3)})
                     # Proper names can have a low token score even in real
@@ -104,7 +109,10 @@ class LocalWhisper:
                     words.append(segment.text)
                 if wake:
                     self.last_wake_diagnostic={'segments':evidence,'accepted_segments':len(words)}
-                return {'text': ''.join(words).strip(), 'language': info.language}
+                result = {'text': ''.join(words).strip(), 'language': info.language}
+                if min_logprob is not None:
+                    result['min_logprob'] = min_logprob
+                return result
             except SpeechError:
                 raise
             except Exception:
@@ -196,6 +204,9 @@ def decode_audio(data):
 class SpeechService:
     def __init__(self, settings, asr: ASRProvider | None = None, tts: TTSProvider | None = None):
         self.asr = asr if asr is not None else LocalWhisper(settings)
+        self.fast_asr = None
+        if asr is None and getattr(settings, 'device_fast_asr', False) and self.asr.model_name != 'tiny':
+            self.fast_asr = LocalWhisper(settings, model_name='tiny', beam_size=3)
         from backend.speech.baidu_asr import BaiduASR
         self.baidu_asr = BaiduASR(settings)
         from backend.speech.keyword_wake import LocalKeywordWake
@@ -204,7 +215,12 @@ class SpeechService:
         self.timeout = getattr(settings, 'speech_timeout', 120)
         self.tts = tts if tts is not None else WindowsSAPI(self.timeout)
         from backend.speech.providers import NaturalTTSService
-        self.natural=NaturalTTSService(self.tts,timeout=min(self.timeout,45))
+        self.device_local_tts = getattr(settings, 'device_local_tts', False)
+        providers = {}
+        if self.device_local_tts:
+            from backend.speech.local_matcha import LocalMatchaTTS
+            providers['local_matcha'] = LocalMatchaTTS()
+        self.natural=NaturalTTSService(self.tts,providers=providers,timeout=min(self.timeout,45))
         self._asr_busy = False
         self.request_metrics = dict(asr_failures=0, tts_failures=0, asr_last_ms=None, tts_last_ms=None)
 
@@ -223,7 +239,22 @@ class SpeechService:
             asr = {'provider': 'disabled', 'ready': False}
         return {'asr': asr, 'wake':self.wake_detector.status(), 'tts': self.tts.status() if hasattr(self.tts, 'status') else {'provider': 'injected', 'ready': True}, 'browser_tts': {'requires_browser': True, 'server_audio': False, 'message': 'Browser must detect speechSynthesis and available voices.'}, 'max_bytes': MAX_BYTES, 'max_duration_seconds': MAX_SECONDS, 'timeout_seconds': self.timeout, 'recordings_retained': False}
 
-    async def transcribe(self, data, content_type, *, provider=None, wake=False):
+    async def transcribe_device(self, data, content_type):
+        if self.fast_asr is not None:
+            return await self.transcribe(data, content_type, fast=True)
+        return await self.transcribe(data, content_type)
+
+    def _fast_result(self, samples):
+        try:
+            result = self.fast_asr.transcribe(samples)
+        except SpeechError:
+            return None
+        score = result.pop('min_logprob', float('-inf'))
+        if result['text'].strip() and score >= -.65:
+            return result
+        return None
+
+    async def transcribe(self, data, content_type, *, provider=None, wake=False, fast=False):
         if len(data) > MAX_BYTES:
             raise SpeechError(413, 'audio_too_large', 'Audio upload exceeds 10 MB.')
         if not data:
@@ -238,10 +269,15 @@ class SpeechService:
         def work():
             try:
                 samples, duration = decode_audio(data)
-                result = selected.transcribe(samples, wake=True) if wake and isinstance(selected,LocalWhisper) else selected.transcribe(samples)
+                engine = selected
+                result = self._fast_result(samples) if fast and self.fast_asr is not None and selected is self.asr and not wake else None
+                if result is not None:
+                    engine = self.fast_asr
+                else:
+                    result = selected.transcribe(samples, wake=True) if wake and isinstance(selected,LocalWhisper) else selected.transcribe(samples)
                 if not result['text'].strip():
                     raise SpeechError(422, 'no_speech', 'No speech was recognized. Try again or use text chat.')
-                return {**result, 'duration': round(duration, 4), 'provider': getattr(selected, 'name', 'injected'), 'sample_rate': 16000, 'channels': 1, 'codec': 'pcm_f32le', 'input_media_type': content_type, 'input_size_bytes': len(data), 'elapsed_ms': round((time.monotonic() - started) * 1000)}
+                return {**result, 'duration': round(duration, 4), 'provider': getattr(engine, 'name', 'injected'), 'model': getattr(engine, 'model_name', None), 'sample_rate': 16000, 'channels': 1, 'codec': 'pcm_f32le', 'input_media_type': content_type, 'input_size_bytes': len(data), 'elapsed_ms': round((time.monotonic() - started) * 1000)}
             finally:
                 # A timeout cannot cancel native CPU inference; keep admission closed until it exits.
                 self._asr_busy = False
@@ -249,6 +285,23 @@ class SpeechService:
             return await asyncio.wait_for(asyncio.to_thread(work), self.timeout)
         except asyncio.TimeoutError:
             raise SpeechError(504, 'asr_timeout', 'Local transcription timed out; use text chat or a smaller model.') from None
+
+    async def warm_device_tts(self):
+        if self.device_local_tts:
+            try:
+                await asyncio.to_thread(self.natural.provider('local_matcha').warmup)
+            except SpeechError:
+                self.device_local_tts = False
+
+    async def synthesize_device(self, text, **options):
+        if (self.device_local_tts and options.get('provider') == 'edge'
+                and options.get('voice') in (None, 'zh-CN-XiaoyiNeural')
+                and not options.get('pitch_hz')):
+            try:
+                return await self.natural.synthesize(text, **(options | {'provider': 'local_matcha', 'voice': 'matcha-zh-baker'}))
+            except SpeechError:
+                pass  # Keep the configured Edge voice as the fallback.
+        return await self.natural.synthesize(text, **options)
 
     async def synthesize(self, text, voice=None, rate=None, volume=None):
         if not text.strip() or len(text) > 2000 or rate is not None and not -10 <= rate <= 10 or volume is not None and not 0 <= volume <= 100:

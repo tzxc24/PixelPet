@@ -1,5 +1,6 @@
 #include "voice_turn_state.h"
 #include "voice_vad.h"
+#include "voice_activity.h"
 #include "audio_capture.h"
 #include "dialog_control.h"
 #include "preroll_buffer.h"
@@ -20,6 +21,8 @@
 #include "esp_transport_tcp.h"
 #include "esp_transport_ws.h"
 #include "esp_wifi.h"
+#include "lwip/sockets.h"
+#include "lwip/tcp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -153,8 +156,14 @@ struct Socket {
         if (!ws) return false;
         esp_transport_ws_set_path(ws, path);
         const auto header = "Authorization: Bearer " + settings.token + "\r\n";
-        return esp_transport_ws_set_headers(ws, header.c_str()) == ESP_OK &&
-               esp_transport_connect(ws, settings.host.c_str(), settings.port, IO_TIMEOUT_MS) >= 0;
+        if (esp_transport_ws_set_headers(ws, header.c_str()) != ESP_OK ||
+            esp_transport_connect(ws, settings.host.c_str(), settings.port, IO_TIMEOUT_MS) < 0) return false;
+        // The WebSocket transport sends frame headers and payloads separately.
+        const int fd = esp_transport_get_socket(transport);
+        const int enabled = 1;
+        if (fd >= 0 && setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) != 0)
+            ESP_LOGW(TAG, "TCP_NODELAY unavailable");
+        return true;
     }
 };
 
@@ -339,6 +348,77 @@ esp_err_t voice_cue(VoiceCue cue) {
     return ESP_OK;
 }
 
+bool play_buffered(int16_t* playback, std::size_t playback_samples, char* buffer, DialogControl& dialog) {
+    ESP_LOGI(TAG, "SPEAKING bytes=%u", unsigned(playback_samples * sizeof(int16_t)));
+    for (std::size_t offset = 0; offset < playback_samples; offset += 480) {
+        const char control = serial_voice_command();
+        dialog.command(control);
+        if (control == 'c') return false;
+        auto* output = playback + offset;
+        const std::size_t samples = std::min(std::size_t(480), playback_samples - offset);
+#if CONFIG_PIXELPET_NETWORK_AUDIO_CONFIRMED
+        for (std::size_t i = 0; i < samples; ++i)
+            output[i] = int16_t(int32_t(output[i]) * CONFIG_PIXELPET_NETWORK_AUDIO_GAIN_PERCENT / 100);
+#endif
+        const auto status = speaker_write(output, samples);
+        if (status != ESP_OK) {
+            ESP_LOGW(TAG, "PLAYBACK_I2S_FAILED status=%s offset=%u",
+                     esp_err_to_name(status), unsigned(offset));
+            return false;
+        }
+    }
+    // Fill one DMA ring with silence and let it drain before reopening the microphone.
+    std::memset(buffer, 0, 6 * 240 * sizeof(int16_t));
+    if (speaker_write(reinterpret_cast<int16_t*>(buffer), 6 * 240) != ESP_OK) return false;
+    vTaskDelay(pdMS_TO_TICKS(65));
+    return true;
+}
+
+bool reminder_poll(esp_transport_handle_t ws, char* buffer, VoiceSession& reminder) {
+    std::size_t length = 0;
+    if (!voice_control(ws, "reminder.poll") || !read_text(ws, buffer, length)) return false;
+    const auto reply = read_voice_reply({buffer, length});
+    return reply.type == "reminder.none" ||
+           (reply.type == "reminder.ready" && reminder.set(reply.session));
+}
+
+bool play_reminder(esp_transport_handle_t ws, char* buffer, const VoiceSession& reminder,
+                   DialogControl& dialog) {
+    if (!voice_control(ws, "reminder.play", reminder.text.data()) ||
+        esp_transport_poll_read(ws, 23000) <= 0) return false;
+    std::size_t length = 0;
+    if (!read_text(ws, buffer, length)) return false;
+    const auto start = read_voice_reply({buffer, length});
+    if (start.type == "reminder.none") return true;
+    if (start.type != "playback.start" || start.session != reminder.text.data() ||
+        !start.pcm_output || !start.bytes || start.bytes % 2 || start.bytes > 120 * 48000) return false;
+    const auto total = start.bytes;
+    std::unique_ptr<int16_t, decltype(&heap_caps_free)> pcm(
+        static_cast<int16_t*>(heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), heap_caps_free);
+    if (!pcm) return false;
+    uint32_t seq = 0;
+    std::size_t offset = 0;
+    const auto deadline = milliseconds() + 10000 + total / 48;
+    while (offset < total && milliseconds() < deadline) {
+        ws_transport_opcodes_t opcode{};
+        if (!read_message(ws, buffer, length, opcode)) return false;
+        if (opcode == WS_TRANSPORT_OPCODES_PONG && !length) continue;
+        char expected[20];
+        reminder.header(expected, seq++);
+        if (opcode != WS_TRANSPORT_OPCODES_BINARY || length <= 20 || length > 4116 ||
+            length % 2 || length - 20 > total - offset || std::memcmp(buffer, expected, 20)) return false;
+        std::memcpy(reinterpret_cast<char*>(pcm.get()) + offset, buffer + 20, length - 20);
+        offset += length - 20;
+    }
+    if (offset != total || !read_text(ws, buffer, length)) return false;
+    const auto end = read_voice_reply({buffer, length});
+    if (end.type != "playback.end" || end.session != reminder.text.data()) return false;
+    if (!play_buffered(pcm.get(), total / sizeof(int16_t), buffer, dialog)) return false;
+    ESP_LOGI(TAG, "REMINDER_PLAYED");
+    return voice_control(ws, "reminder.ack", reminder.text.data()) &&
+           read_text(ws, buffer, length) && read_voice_reply({buffer, length}).type == "reminder.ack";
+}
+
 bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, VoiceSession& conversation,
                 VoiceTrigger trigger, DialogControl& dialog) {
     const bool checking_wake = dialog.standby();
@@ -353,19 +433,22 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
     ESP_LOGI(TAG, "AUDIO_WARMUP");
     if (microphone_prepare(&noise_rms) != ESP_OK) return false;
     VoiceVad activity(noise_rms);
+    // Speech during microphone warmup must not set an unreachable onset threshold.
+    SpeechActivity energy_activity(noise_rms, trigger == VoiceTrigger::Continuous && !checking_wake ? 450.0 : 3000.0);
     if (!activity.ready() || (voice_turn_uses_cues(trigger) && voice_cue(VoiceCue::Start) != ESP_OK)) {
         if (microphone_begin_recording() == ESP_OK) microphone_end_recording();
         return false;
     }
     AudioCapture capture_stream;
     if (capture_stream.start() != ESP_OK) return false;
-    ESP_LOGI(TAG, "VAD provider=%s noise=%.1f frame_ms=20; stop after 1800ms silence",
-             VoiceVad::provider(), double(noise_rms));
+    ESP_LOGI(TAG, "VAD provider=%s noise=%.1f onset=%.1f frame_ms=20; stop after %dms silence",
+             checking_wake ? "energy" : "energy onset + ESP-SR continuation", double(noise_rms), energy_activity.threshold(),
+             checking_wake || trigger != VoiceTrigger::Continuous ? standby_silence_ms : continuous_silence_ms);
     ESP_LOGI(TAG, "LISTENING");
-    ESP_LOGI(TAG, "DIALOG_MODE=%s", checking_wake ? "STANDBY; LAN to local Whisper only" : "ACTIVE");
+    ESP_LOGI(TAG, "DIALOG_MODE=%s", checking_wake ? "STANDBY; server keyword detection" : "ACTIVE");
     ESP_LOGI(TAG, "VOICE_PROMPTS=%s", voice_turn_uses_cues(trigger) ? "on" : "off; automatic speech/silence detection");
     VoiceTurnState turn;
-    turn.start(trigger, milliseconds());
+    turn.start(trigger, milliseconds(), checking_wake);
     auto capture = CaptureDecision::Continue;
     size_t count = 0;
     uint64_t energy = 0;
@@ -390,6 +473,18 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
                 break;
             }
             capture_heartbeat = milliseconds() + HEARTBEAT_MS;
+            if (!collecting) {
+                VoiceSession reminder;
+                if (!reminder_poll(ws, buffer, reminder)) {
+                    ok = false;
+                    break;
+                }
+                if (reminder.text[0]) {
+                    if (capture_stream.stop() != ESP_OK) return false;
+                    recording.reset();
+                    return play_reminder(ws, buffer, reminder, dialog);
+                }
+            }
         }
         bool pressed = false;
         if (touch_read(&pressed) == ESP_OK) {
@@ -407,10 +502,11 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
         uint64_t chunk_energy = 0;
         for (size_t i = 0; i < received; ++i) chunk_energy += int32_t(pcm[i]) * int32_t(pcm[i]);
         energy += chunk_energy;
-        const auto decision = activity.process(pcm,received,frame.captured_at);
+        const bool energy_speech = energy_activity.observe(pcm_rms(pcm, received), frame.captured_at);
+        const auto decision = checking_wake ? VoiceDecision::Silence : activity.process(pcm, received, frame.captured_at);
         if (decision == VoiceDecision::Invalid) { ok = false; break; }
-        // Keep a short preroll in the recording, but ignore cue leakage for endpoints.
-        const bool speech = seen_samples >= 3200 && decision == VoiceDecision::Speech;
+        // Require sustained energy to start, then keep quieter syllables detected by ESP-SR.
+        const bool speech = seen_samples >= 3200 && (energy_speech || (collecting && decision == VoiceDecision::Speech));
         seen_samples = std::min(std::size_t(3200), seen_samples + received);
         capture = turn.capture(speech, frame.captured_at);
         if (capture == CaptureDecision::Cancel) break;
@@ -452,6 +548,7 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
     ESP_LOGI(TAG, "UPLOADING samples=%u duration_ms=%u mean_square=%lu", unsigned(count), unsigned(count / 16),
              static_cast<unsigned long>(energy / count));
     // Buffer bounded audio in PSRAM first. Network writes must not stall the I2S reader.
+    const auto upload_started = milliseconds();
     for (std::size_t offset = 0; offset < count; offset += 2048) {
         const auto chunk = std::min(std::size_t(2048), count - offset);
         session.header(buffer, seq++);
@@ -460,10 +557,14 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
     }
     recording.reset();
     if (!voice_control(ws, "record.stop", session.text.data())) return false;
+    ESP_LOGI(TAG, "UPLOAD_COMPLETE ms=%ld", static_cast<long>(milliseconds() - upload_started));
     auto deadline = milliseconds() + 100000;
     auto heartbeat_at = milliseconds() + HEARTBEAT_MS;
     bool playing = false;
     uint32_t remaining = 0;
+    std::size_t playback_samples = 0;
+    std::size_t buffered_samples = 0;
+    std::unique_ptr<int16_t, decltype(&heap_caps_free)> playback(nullptr, heap_caps_free);
     seq = 0;
     while (wifi_ready() && milliseconds() < deadline) {
         if (!playing && milliseconds() >= heartbeat_at) {
@@ -482,19 +583,23 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
         if (readable < 0) return false;
         if (readable == 0) continue;
         ws_transport_opcodes_t opcode{};
-        if (!read_message(ws, buffer, length, opcode)) return false;
+        if (!read_message(ws, buffer, length, opcode)) {
+            if (playing) ESP_LOGW(TAG, "PLAYBACK_NETWORK_INTERRUPTED bytes_remaining=%u", unsigned(remaining));
+            return false;
+        }
         if (opcode == WS_TRANSPORT_OPCODES_PONG && length == 0) continue;
         if (opcode == WS_TRANSPORT_OPCODES_BINARY) {
             char expected[20];
             session.header(expected, seq++);
             if (!playing || length <= 20 || length > 4116 || length % 2 || length - 20 > remaining ||
-                std::memcmp(buffer, expected, 20)) return false;
-            auto* output = reinterpret_cast<int16_t*>(buffer + 20);
-#if CONFIG_PIXELPET_NETWORK_AUDIO_CONFIRMED
-            for (std::size_t i = 0; i < (length - 20) / 2; ++i)
-                output[i] = int16_t(int32_t(output[i]) * CONFIG_PIXELPET_NETWORK_AUDIO_GAIN_PERCENT / 100);
-#endif
-            if (speaker_write(output, (length - 20) / 2) != ESP_OK) return false;
+                std::memcmp(buffer, expected, 20)) {
+                ESP_LOGW(TAG, "PLAYBACK_FRAME_INVALID frame=%lu bytes_remaining=%u",
+                         static_cast<unsigned long>(seq), unsigned(remaining));
+                return false;
+            }
+            const std::size_t samples = (length - 20) / sizeof(int16_t);
+            std::memcpy(playback.get() + buffered_samples, buffer + 20, samples * sizeof(int16_t));
+            buffered_samples += samples;
             remaining -= length - 20;
             continue;
         }
@@ -526,14 +631,19 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
                 (reply.conversation.empty() && !checking_wake)) return false;
             if (!turn.play()) return false;
             remaining = reply.bytes;
+            playback_samples = remaining / sizeof(int16_t);
+            playback.reset(static_cast<int16_t*>(heap_caps_malloc(remaining, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+            if (!playback) {
+                ESP_LOGW(TAG, "PLAYBACK_BUFFER_ALLOC_FAILED bytes=%u", unsigned(remaining));
+                return false;
+            }
             deadline = milliseconds() + 10000 + remaining / 48;
             playing = true;
-            ESP_LOGI(TAG, "SPEAKING");
+            ESP_LOGI(TAG, "PLAYBACK_BUFFERING bytes=%u", unsigned(remaining));
         } else if (reply.type == "playback.end" && playing && seq && !remaining) {
-            // Push one default DMA ring of silence so the final PCM reaches I2S before IDLE.
-            std::memset(buffer, 0, 6 * 240 * sizeof(int16_t));
-            if (speaker_write(reinterpret_cast<int16_t*>(buffer), 6 * 240) != ESP_OK) return false;
-            ESP_LOGI(TAG, "IDLE");
+            if (buffered_samples != playback_samples) return false;
+            if (!play_buffered(playback.get(), playback_samples, buffer, dialog)) return false;
+            ESP_LOGI(TAG, "PLAYBACK_COMPLETE frames=%lu", static_cast<unsigned long>(seq));
             return true;
         }
     }
@@ -544,10 +654,12 @@ void run_voice_session(const NetworkSettings& settings, const char* path, char* 
                        VoiceSession& conversation, DialogControl& dialog) {
     Socket socket;
     size_t length = 0;
-    if (!socket.connect(settings, path) || !voice_control(socket.ws, "hello") ||
+    char hello[] = R"({"version":1,"type":"hello","client":"esp32","reminders":true})";
+    if (!socket.connect(settings, path) ||
+        !send_voice(socket.ws, WS_TRANSPORT_OPCODES_TEXT, hello, sizeof(hello) - 1) ||
         !read_text(socket.ws, buffer, length) || read_voice_reply({buffer, length}).type != "hello") return;
     connected = true;
-    ESP_LOGI(TAG, "PixelPet voice protocol ready; d=continuous, w=standby, r=single, s=submit, c=stop");
+    ESP_LOGI(TAG, "PixelPet voice protocol ready; continuous listening enabled at boot; d=resume, c=stop");
     TouchGesture touch;
     auto heartbeat_at = milliseconds() + HEARTBEAT_MS;
     while (wifi_ready()) {
@@ -560,12 +672,15 @@ void run_voice_session(const NetworkSettings& settings, const char* path, char* 
             if (!voice_turn(socket.ws, buffer, touch, conversation, trigger, dialog)) return;
             if (dialog.enabled()) {
                 ESP_LOGI(TAG, "NEXT_TURN: %s", dialog.standby() ? "standby local wake detection" : "continuing the same conversation");
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
             heartbeat_at = milliseconds() + HEARTBEAT_MS;
         } else if (milliseconds() >= heartbeat_at) {
             if (!voice_control(socket.ws, "heartbeat") || !read_text(socket.ws, buffer, length) ||
                 read_voice_reply({buffer, length}).type != "heartbeat") return;
+            VoiceSession reminder;
+            if (!reminder_poll(socket.ws, buffer, reminder) ||
+                (reminder.text[0] && !play_reminder(socket.ws, buffer, reminder, dialog))) return;
             heartbeat_at = milliseconds() + HEARTBEAT_MS;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -649,7 +764,7 @@ esp_err_t run_network(bool wifi_only) {
     int backoff_ms = 1000;
     unsigned reconnects = 0;
     VoiceSession conversation;
-    DialogControl dialog;
+    DialogControl dialog(false);
     while (true) {
         bool connected = false;
         if (wait_for_wifi()) {

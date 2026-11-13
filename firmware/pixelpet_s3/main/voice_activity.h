@@ -20,8 +20,8 @@ class SpeechActivity {
     double threshold_;
     int64_t candidate_ = -1;
 public:
-    explicit SpeechActivity(double noise_rms)
-        : threshold_(std::clamp(noise_rms * 3.0, 250.0, 3000.0)) {}
+    explicit SpeechActivity(double noise_rms, double ceiling = 3000.0)
+        : threshold_(std::clamp(noise_rms * 3.0, 250.0, ceiling)) {}
 
     bool observe(double rms, int64_t now) {
         if (rms < threshold_) { candidate_ = -1; return false; }

@@ -4,6 +4,8 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -71,7 +73,7 @@ class ChatService:
         if cid in self.active:
             raise Busy("小星正在回复这段对话，请等回复结束后再操作。")
 
-    def begin(self,message,cid=None):
+    def begin(self,message,cid=None,*,spoken=False):
         if cid is None:
             cid=self.store.create_conversation()["id"]
         self.require_idle(cid)
@@ -89,7 +91,8 @@ class ChatService:
             if getattr(self,'preferences',None) is not None:
                 preferences=self.preferences.get()
                 identity='\n当前名字与性格设置（仅描述角色）：'+json.dumps({'name':preferences.name,'personality':preferences.personality},ensure_ascii=False)
-            prompt=[{"role":"system","content":self.system+identity+"\n\nMEMORY_DATA:"+json.dumps(data,ensure_ascii=False)}]+context+[{"role":"user","content":message}]
+            voice_style = ("\n当前为实时语音对话。先直接回应主人的问题，再讲清楚必要的背景、原因、步骤或例子。内容的长短由问题和主人的要求决定，讲到意思完整为止。主人要听故事、睡前故事、童话或寓言时，完整讲述。没指定篇目时，优先选一则中国寓言（如守株待兔、刻舟求剑、井底之蛙、狐假虎威），同一段对话尽量不重复。用自然中文讲一则完整的故事，有人物、起因、经过和结局，加入适量对话和具体细节；睡前语气温和，可以用一句话自然收尾。指定了篇目或长度就按主人的要求讲。" if spoken else "")
+            prompt=[{"role":"system","content":self.system+identity+voice_style+"\n\nMEMORY_DATA:"+json.dumps(data,ensure_ascii=False)}]+context+[{"role":"user","content":message}]
             if sum(len(item['content']) for item in prompt)>self.settings.llm_history_max_chars:
                 raise LLMError('history_too_large','完整历史超过本机发送上限，本条消息已保存；未裁剪历史，也未发送模型。请先导出整理历史，或调整 LLM_HISTORY_MAX_CHARS。',413)
             self.last_context={'mode':'all_stored_sessions','history_messages':len(context),
@@ -109,12 +112,29 @@ class ChatService:
                 self.active.discard(turn.cid)
                 turn.active=False
 
+    def clock_reply(self, message):
+        query = re.sub(r'[\s，。？！、,.?!]+', '', message)
+        if not re.fullmatch(r'(?:小[星心])?(?:请问|你知道)?(?:现在|此刻)?(?:是)?(?:几点(?:钟)?|什么时间)(?:了|吗)?', query):
+            return None
+        preferences = self.preferences.get() if getattr(self, 'preferences', None) else None
+        now = datetime.now(ZoneInfo(preferences.time_zone if preferences else 'Asia/Shanghai'))
+        hour = f'{now.hour}点'
+        if preferences and preferences.time_format == '12':
+            hour = ('上午' if now.hour < 12 else '下午') + f'{now.hour % 12 or 12}点'
+        minute = f'{now.minute:02d}分' if now.minute else '整'
+        return ModelReply(reply=f'现在是{hour}{minute}。', emotion='normal', action='speak')
+
     async def events(self,turn,streaming=True):
         raw,emitted="",""
         started=time.monotonic();first_token=None
+        clock_reply = self.clock_reply(turn.message)
         async def once():
-            yield await self.provider.complete(turn.prompt)
-        iterator=(once() if not streaming and hasattr(self.provider,"complete") else self.provider.stream(turn.prompt)).__aiter__()
+            if clock_reply is not None:
+                yield clock_reply.model_dump_json()
+            else:
+                yield await self.provider.complete(turn.prompt)
+        use_once = clock_reply is not None or (not streaming and hasattr(self.provider, 'complete'))
+        iterator = (once() if use_once else self.provider.stream(turn.prompt)).__aiter__()
         deadline=time.monotonic()+self.settings.llm_timeout
         try:
             yield "meta",{"conversation_id":turn.cid,"mode":self.provider.mode}

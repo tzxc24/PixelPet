@@ -175,7 +175,8 @@ esp_err_t microphone_prepare(float* noise_rms) {
  int16_t pcm[256];
  std::array<double,16> noise{};
  std::size_t noise_windows=0;
- std::size_t remaining=2*PIXELPET_AUDIO_INPUT_SAMPLE_RATE;
+ // Let the I2S microphone settle before measuring the final 256 ms of noise.
+ std::size_t remaining=PIXELPET_AUDIO_INPUT_SAMPLE_RATE*6/10;
  while(remaining){
   const auto count=std::min(remaining,std::size_t(256));
   std::size_t bytes=0;

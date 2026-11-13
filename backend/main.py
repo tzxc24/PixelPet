@@ -45,7 +45,7 @@ def create_app(database_path: Path | None = None, settings: Settings | None = No
         application.state.allowed_hosts = allowed_hosts
         try:
             application.state.store = Store(application.state.engine,settings.memory_decay_days)
-            application.state.preferences=PreferencesService(application.state.engine)
+            application.state.preferences=PreferencesService(application.state.engine, default_model=settings.llm_model)
             application.state.scheduler=ReminderScheduler(application.state.preferences)
             application.state.event_bus=EventBus()
             application.state.pet_engine=PetEngine(application.state.event_bus)
@@ -61,6 +61,7 @@ def create_app(database_path: Path | None = None, settings: Settings | None = No
             application.state.chat = ChatService(application.state.store, application.state.provider, settings)
             application.state.chat.preferences=application.state.preferences
             application.state.chat.pet_engine=application.state.pet_engine
+            await application.state.speech.warm_device_tts()
             yield
         finally:
             if hasattr(application.state, "provider"):

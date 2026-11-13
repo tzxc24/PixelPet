@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     character_path: Path = Path("config/character.json")
     asr_model: str = "base"
     asr_model_download: bool = False
+    device_fast_asr: bool = False
+    device_local_tts: bool = False
     memory_decay_days: float = Field(default=90,ge=0,le=3650)
     speech_timeout: float = Field(default=120,gt=0,le=300)
     access_token: SecretStr = SecretStr("")
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
             values=dotenv_values(ROOT / ".env",encoding="utf-8-sig",interpolate=False)
             known={"LLM_HISTORY_MAX_CHARS","BAIDU_ASR_API_KEY","BAIDU_ASR_SECRET_KEY","BAIDU_ASR_TIMEOUT","BAIDU_ASR_DEV_PID","LLM_PROVIDER","LLM_BASE_URL","LLM_API_KEY","LLM_MODEL","LLM_TIMEOUT","LLM_MODE","LLM_THINKING","DEEPSEEK_API_KEY"}
             result={key:value for key,value in values.items() if key in known and value is not None}
-            for key in ("database_path","character_path","asr_model","asr_model_download","memory_decay_days","speech_timeout","access_token","allowed_hosts"):
+            for key in ("database_path","character_path","asr_model","asr_model_download","device_fast_asr","device_local_tts","memory_decay_days","speech_timeout","access_token","allowed_hosts"):
                 value=values.get("PIXELPET_"+key.upper())
                 if value is not None:
                     result[key]=value
