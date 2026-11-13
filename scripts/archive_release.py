@@ -39,7 +39,7 @@ def main():
             if any(secret in file.read_bytes() for secret in secrets)]
     if hits:
         raise SystemExit('Configured credential match in: ' + ', '.join(hits))
-    archive = output / 'PixelPet-V1.2-RC2-source.zip'
+    archive = output / 'PixelPet-V1.2-RC3-source.zip'
     with ZipFile(archive, 'x', ZIP_DEFLATED) as target:
         for file in sorted(source):
             target.write(file, file.relative_to(ROOT).as_posix())

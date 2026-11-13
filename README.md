@@ -1,4 +1,4 @@
-# PixelPet V1.2-RC2 · 小星
+# PixelPet V1.2-RC3 · 小星
 
 > 当前云端语音版（2026-11-13）支持 ESP32 直连服务器、连续问答、实时报时和定时语音提醒。构建及升级顺序见 [当前版本说明](docs/GITHUB_SNAPSHOT.md)。
 
