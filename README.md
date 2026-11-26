@@ -1,6 +1,6 @@
-# PixelPet V1.2-RC3 · 小星
+# PixelPet V1.2-RC4 · 小星
 
-> 当前云端语音版（2026-11-13）支持 ESP32 直连服务器、连续问答、实时报时和定时语音提醒。构建及升级顺序见 [当前版本说明](docs/GITHUB_SNAPSHOT.md)。
+> RC4（2026-11-26）加入语音音乐闹钟、PWM 控灯、长回复分段播放和自动健康回访。使用方法、升级顺序和实测限制见 [RC4 说明](docs/RELEASE_RC4.md)。
 
 RC2 的验收、启动、恢复和硬件联调资料集中在 [发布文档](docs/release_v1.2/V1.2_最终开发报告.md)。Windows 双击 `start_pixelpet.bat`。如果提示旧版本占用端口，先退出旧进程再运行。
 

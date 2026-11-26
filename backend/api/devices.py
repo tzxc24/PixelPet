@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from backend.preferences.scheduler import parse_voice_reminder
 from uuid import uuid4
 from backend.speech.service import SpeechError
-from backend.speech.commands import is_rest_command, is_wake_command, normalize, assistant_rest_commitment
+from backend.speech.commands import is_rest_command, is_wake_command, normalize, assistant_rest_commitment, addressed_command
 from backend.ai.schemas import ModelReply
 from backend.ai.provider import LLMError
 from backend.access import access_error
@@ -40,7 +40,7 @@ def device_playback_pcm(data: bytes, peak: float) -> bytes:
 async def voice_status(request: Request):
     return {'devices': [
         {'id': identity, **{key: item.get(key) for key in
-         ('conversation_id', 'state', 'dialog_state', 'last_heartbeat', 'connected_at')}}
+         ('conversation_id', 'state', 'dialog_state', 'last_heartbeat', 'connected_at', 'home_control', 'firmware_version')}}
         for identity, item in getattr(request.app.state, 'voice_devices', {}).items()
     ]}
 
@@ -70,10 +70,21 @@ async def voice_socket(ws: WebSocket):
     worker = None
     welcomed = False
     supports_reminders = False
+    supports_home = False
+    supports_segments = False
     offered_reminder = None
     played_reminder = None
     record_deadline = None
     clock = asyncio.get_running_loop().time
+
+    def home_fields():
+        if not supports_home:
+            return {}
+        lamp = app.home.snapshot()['devices'].get(device, {}).get('lamp')
+        if not lamp:
+            return {}
+        return dict(lamp_revision=lamp['revision'], lamp_mode=lamp['mode'],
+                    lamp_level=lamp['level'], lamp_seconds=lamp['seconds'])
 
     async def reply(kind, **fields):
         if kind == 'error':
@@ -89,19 +100,20 @@ async def voice_socket(ws: WebSocket):
             volume_percent=round((prefs.volume-1)*100), pitch_hz=prefs.pitch_hz,
             output_format='device_pcm', sample_rate=24000)
 
-    async def send_audio(session_id, audio, **fields):
+    async def send_audio(session_id, audio, *, more=False, **fields):
         playback = device_playback_pcm(audio.data, audio.peak)
         await reply('playback.start', session_id=session_id, sample_rate=audio.sample_rate,
-                    channels=audio.channels, format=audio.codec, byte_count=len(playback), **fields)
+                    channels=audio.channels, format=audio.codec, byte_count=len(playback), **home_fields(), **fields)
         identity = bytes.fromhex(session_id)
         for index, offset in enumerate(range(0, len(playback), VOICE_CHUNK)):
             chunk = playback[offset:offset+VOICE_CHUNK]
             await ws.send_bytes(VOICE_HEADER.pack(identity, index) + chunk)
             metrics['downloaded'] += len(chunk)
-        await reply('playback.end', session_id=session_id)
+        await reply('playback.end', session_id=session_id, more=more)
 
     async def process(session_id, samples, conversation_id, purpose):
         turn = None
+        name_only = False
         loop = asyncio.get_running_loop()
         started = loop.time()
         try:
@@ -142,12 +154,29 @@ async def voice_socket(ws: WebSocket):
                 metrics['dialog_state'] = 'active'
                 await reply('dialog.state', session_id=session_id, dialog_state='active')
             else:
-                turn = app.chat.begin(transcript['text'], conversation_id, spoken=True)
+                message = transcript['text']
+                name_only = False
+                if supports_home:
+                    command = addressed_command(message)
+                    if command is None:
+                        metrics['last_voice_decision'] = 'name_not_recognized'
+                        await reply('error', code='no_speech', session_id=session_id)
+                        return
+                    name_only = command == ''
+                    message = command or message
+                    metrics['last_voice_decision'] = 'name_only' if name_only else 'accepted'
+                turn = app.chat.begin(message, conversation_id, spoken=True)
                 cid = turn.cid
                 metrics['conversation_id'] = cid
                 result = None
-                reminder = parse_voice_reminder(transcript['text']) if supports_reminders else None
-                if reminder is not None:
+                home_reply = '我在。' if name_only else app.home.voice(device, message) if supports_home else None
+                reminder = parse_voice_reminder(message) if supports_reminders else None
+                if home_reply is not None:
+                    result = {'reply': home_reply, 'emotion': 'normal'}
+                    app.store.finish_message(turn.cid, turn.mid, ModelReply(**result, action='speak'), 'device_control')
+                    app.chat.active.discard(turn.cid)
+                    turn.active = False
+                elif reminder is not None:
                     minutes, content = reminder
                     if not 1 <= minutes <= 1440:
                         text = '请说一个一到一千四百四十分钟之间的时间。'
@@ -162,7 +191,7 @@ async def voice_socket(ws: WebSocket):
                     app.store.finish_message(turn.cid, turn.mid, ModelReply(**result, action='speak'), 'device_control')
                     app.chat.active.discard(turn.cid)
                     turn.active = False
-                elif is_rest_command(transcript['text']):
+                elif is_rest_command(message):
                     dialog_state = 'standby'
                     metrics['dialog_state'] = 'standby'
                     result = {'reply': '好，我先休息啦。想聊天时叫我“你好小星”。', 'emotion': 'sleepy'}
@@ -183,22 +212,43 @@ async def voice_socket(ws: WebSocket):
                 await reply('dialog.state', session_id=session_id, dialog_state='standby')
             metrics.update(result.get('timings', {}))
             tts_started = loop.time()
-            for attempt in range(2):
-                try:
-                    audio = await synthesize(result['reply'], result['emotion'])
-                    break
-                except SpeechError as exc:
-                    if attempt or exc.code not in ('tts_network', 'tts_timeout'):
-                        raise
-                    metrics['tts_retries'] = metrics.get('tts_retries', 0) + 1
-                    await asyncio.sleep(1)
+            async def generate(text):
+                for attempt in range(2):
+                    try:
+                        return await synthesize(text, result['emotion'])
+                    except SpeechError as exc:
+                        if attempt or exc.code not in ('tts_network', 'tts_timeout'):
+                            raise
+                        metrics['tts_retries'] = metrics.get('tts_retries', 0) + 1
+                        await asyncio.sleep(1)
+
+            full_text = result['reply']
+            parts = [full_text]
+            if supports_segments and purpose != 'wake' and len(full_text) >= 80:
+                boundary = re.search(r'[。！？；，](?=.{20})', full_text[11:65], re.S)
+                cut = 11 + boundary.end() if boundary else 35
+                parts = [full_text[:cut], full_text[cut:]]
+            audio = await generate(parts[0])
             metrics.update(state='sending', tts_ms=round((loop.time()-tts_started)*1000),
                            reply_ms=round((loop.time()-started)*1000))
             metrics['tts_provider'] = audio.provider
-            await send_audio(session_id, audio, conversation_id=cid, dialog_state=dialog_state,
-                             emotion=result['emotion'], text=result['reply'][:500],
-                             timings={key: value for key, value in metrics.items() if key.endswith('_ms')})
+            fields = dict(conversation_id=cid, dialog_state=dialog_state,
+                          emotion=result['emotion'], text=full_text[:500],
+                          timings={key: value for key, value in metrics.items() if key.endswith('_ms')})
+            if len(parts) == 1:
+                await send_audio(session_id, audio, **fields)
+            else:
+                continuation = asyncio.create_task(generate(parts[1]))
+                try:
+                    await send_audio(session_id, audio, more=True, **fields)
+                    await send_audio(session_id, await continuation, **fields)
+                finally:
+                    if not continuation.done():
+                        continuation.cancel()
+                    await asyncio.gather(continuation, return_exceptions=True)
         except (SpeechError, LLMError) as exc:
+            if exc.code == 'no_speech':
+                metrics['last_voice_decision'] = 'asr_no_speech'
             await reply('error', code=exc.code, session_id=session_id)
         except asyncio.CancelledError:
             raise
@@ -276,6 +326,12 @@ async def voice_socket(ws: WebSocket):
             if kind == 'hello' and not welcomed:
                 welcomed = True
                 supports_reminders = msg.get('reminders') is True
+                supports_home = msg.get('home_control') is True
+                supports_segments = msg.get('segmented_reply') is True
+                metrics['segmented_reply'] = supports_segments
+                metrics['home_control'] = supports_home
+                if supports_home:
+                    app.home.reconnect(device)
                 firmware = msg.get('firmware_version')
                 if isinstance(firmware, str) and re.fullmatch(r'[\w.+-]{1,40}', firmware, re.ASCII):
                     metrics['firmware_version'] = firmware
@@ -286,13 +342,28 @@ async def voice_socket(ws: WebSocket):
                 metrics['last_heartbeat'] = datetime.now(timezone.utc).isoformat()
                 await reply('heartbeat')
             elif welcomed and supports_reminders and kind == 'reminder.poll' and session is None:
+                home = app.home.poll(device) if supports_home else {}
+                music = home.get('music')
                 item = app.scheduler.next_device_reminder(device)
-                offered_reminder = item['id'] if item else None
-                if item:
-                    await reply('reminder.ready', session_id=offered_reminder)
+                offered_reminder = music['id'] if music and music['status'] == 'pending' else item['id'] if item else None
+                if offered_reminder:
+                    await reply('reminder.ready', session_id=offered_reminder, **home_fields())
                 else:
-                    await reply('reminder.none')
+                    await reply('reminder.none', **home_fields())
             elif welcomed and supports_reminders and kind == 'reminder.play' and session is None:
+                identity = msg.get('session_id')
+                music_track = app.home.claim(device, identity) if supports_home and identity == offered_reminder else None
+                if music_track:
+                    try:
+                        audio = await asyncio.to_thread(app.home.audio, music_track, identity)
+                        # A fixed-duration alarm can play from its complete local buffer.
+                        is_alarm = any(item['id'] == identity for item in app.home.snapshot()['alarms'])
+                        await send_audio(identity, audio, music=not is_alarm)
+                        played_reminder = identity
+                    except Exception:
+                        app.home.finish(device, identity)
+                        await reply('reminder.none')
+                    continue
                 item = app.scheduler.next_device_reminder(device)
                 if not item or not offered_reminder or offered_reminder != item['id'] or msg.get('session_id') != offered_reminder:
                     await reply('reminder.none')
@@ -306,8 +377,12 @@ async def voice_socket(ws: WebSocket):
                     await reply('reminder.none')
             elif welcomed and supports_reminders and kind == 'reminder.ack' and played_reminder and msg.get('session_id') == played_reminder:
                 app.scheduler.ack_device_reminder(device, played_reminder)
+                if supports_home:
+                    app.home.finish(device, played_reminder)
                 offered_reminder = played_reminder = None
                 await reply('reminder.ack')
+            elif welcomed and supports_home and kind == 'music.check':
+                await reply('music.check', music_continue=app.home.playing(device, msg.get('session_id')), **home_fields())
             elif welcomed and kind == 'record.start' and session is None:
                 if app.preferences.get().asr_provider == 'disabled':
                     await reply('error', code='asr_disabled')

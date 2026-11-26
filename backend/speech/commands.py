@@ -29,3 +29,14 @@ def assistant_rest_commitment(text):
         return False
     phrase=normalize(text)
     return bool(re.match(r'^(?:好(?:的|呀|啊|啦)?|嗯)?(?:那|现在)?我(?:先|乖乖|这就|去|就|要|准备)?(?:休息|睡一)',phrase))
+
+
+def addressed_command(text):
+    text = unicodedata.normalize('NFKC', text).strip()
+    match = re.match(r'^(?:你好[\s，,]*)?(?:[小晓][星心新辛兴馨][\s，,、:：。！!？?]*){1,2}', text)
+    if not match:
+        return None
+    command = text[match.end():].strip()
+    if text.startswith('小心') and re.match(r'^(?:摔|烫|碰|危险|别|点|车|脚下)', command):
+        return None
+    return command

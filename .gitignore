@@ -29,3 +29,8 @@ output/
 *.bin
 .vscode/
 .idea/
+
+# Bundled alarm tracks
+!assets/music/01_morning_chime.wav
+!assets/music/02_wakeup_loop.wav
+!assets/music/06_sunbeam_bounce.wav

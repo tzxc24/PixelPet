@@ -17,6 +17,7 @@
   <script src="/static/js/audio-player.js?v=2" defer></script>
   <script src="/static/js/wake-word.js?v=1" defer></script>
   <script src="/static/js/runtime.js?v=3" defer></script>
+  <script src="/static/js/home.js?v=1" defer></script>
 </head>
 <body>
   <div class="page">
@@ -85,6 +86,25 @@
         <label>每日提醒上限<input name="daily_limit" type="number" min="0" max="100" value="3"></label><label>模型名称<input name="llm_model" value="deepseek-flash" maxlength="100"></label>
         <div class="speech-actions"><button type="button" id="voice-preview">▷ 试听当前声音</button><button type="button" id="voice-defaults">恢复语音默认值</button><a href="/voice-test" target="_blank" rel="noopener">打开声音对比页 ↗</a></div><button type="submit">保存其他设置</button><span id="settings-status" role="status"></span>
       </form><p class="memory-hint">DeepSeek 接收聊天文本和相关记忆；Edge 自然语音会将回复文本发送给 Microsoft，无需 API Key；Whisper 与 SAPI 在本机运行。语音控制自动保存，其余设置点击保存。浏览器合成取决于系统/浏览器声音，可能使用在线声音。安静时段内自动播放和模拟触觉关闭。</p></section>
+      <section class="workbench" id="home-panel" style="padding-bottom:22px" aria-label="灯光和定时音乐">
+        <div class="bench-heading"><h2>灯光和定时音乐</h2><button type="button" id="home-refresh" class="text-button">刷新设备</button></div>
+        <p id="home-status" role="status">正在读取设备</p>
+        <label>桌宠 <select id="home-device"></select></label>
+        <p>灯板 PWM 接 GPIO 3，GND 共地。高电平点亮，3.3V / 1kHz。</p>
+        <div class="voice-controls" style="justify-content:flex-start">
+          <button type="button" data-lamp="on">开灯</button><button type="button" data-lamp="off">关灯</button>
+          <button type="button" data-lamp="fade">渐亮</button><button type="button" data-lamp="dim">渐灭</button>
+          <button type="button" data-lamp="breath">呼吸灯</button>
+        </div>
+        <label>亮度 <input id="home-level" type="range" min="0" max="100" value="100" style="width:180px"> <output id="home-level-value">100%</output></label>
+        <label>渐变或呼吸周期（秒）<input id="home-seconds" type="number" min="1" max="600" value="3" style="width:85px;border:1px solid #aaa"></label>
+        <p><label>音乐 <select id="home-track"></select></label> <button type="button" id="home-play">立即播放</button> <button type="button" id="home-stop">停止音乐</button></p>
+        <p><label>播放时间（本机时间）<input id="home-time" type="datetime-local" style="width:auto;border:1px solid #aaa"></label>
+          <label><input id="home-wake" type="checkbox" style="width:auto">同时渐亮（30秒）</label>
+          <button type="button" id="home-create">添加定时</button></p>
+        <div id="home-alarms"></div>
+        <p>可说“开灯”“亮度调到百分之五十”“呼吸灯”“十分钟后播放音乐”“明天早上七点播放起床旋律并开灯”。定时为单次，设备在线空闲时执行，超过十分钟的离线定时跳过。播放音乐期间暂停收音，可在此停止。</p>
+      </section>
       <section class="workbench" id="diagnostics-panel" hidden aria-label="诊断"><div class="bench-heading"><h2>设备与事件诊断</h2><button type="button" id="refresh-diagnostics">刷新</button></div><pre id="diagnostics-output">等待诊断</pre><h3>本地提醒</h3><form id="reminder-form"><label class="sr-only" for="reminder-text">提醒内容</label><input id="reminder-text" placeholder="提醒内容" maxlength="500" required><label class="sr-only" for="reminder-time">提醒时间（本机时区）</label><input id="reminder-time" type="datetime-local" title="以电脑本机时区输入，与宠物显示时区可不同" required><button type="submit">添加</button></form><div id="reminder-list"></div><p class="memory-hint">提醒时间按电脑本机时区输入；仅在本服务和页面运行时显示。服务关闭不通知，超过 24 小时的过期提醒不补发。安静时段和次数限制会推迟提醒。</p></section>
       <p id="error" class="error" role="alert" hidden></p>
       <p id="chat-error" class="error" role="alert" hidden></p>

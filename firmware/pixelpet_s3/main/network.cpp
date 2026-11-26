@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "network.h"
+#include "lamp.h"
 #include "device_protocol.h"
 #include "drivers.h"
 #include "esp_check.h"
@@ -348,12 +349,25 @@ esp_err_t voice_cue(VoiceCue cue) {
     return ESP_OK;
 }
 
-bool play_buffered(int16_t* playback, std::size_t playback_samples, char* buffer, DialogControl& dialog) {
+void apply_lamp(const VoiceReply& reply) {
+    if (reply.lamp_mode!="steady" && reply.lamp_mode!="fade" && reply.lamp_mode!="breath") return;
+    lamp_command(reply.lamp_revision,reply.lamp_level,reply.lamp_mode=="steady" ? 1 : reply.lamp_seconds,reply.lamp_mode=="breath");
+}
+bool play_buffered(int16_t* playback, std::size_t playback_samples, char* buffer, DialogControl& dialog,
+                   esp_transport_handle_t music_ws=nullptr,const char* identity=nullptr) {
     ESP_LOGI(TAG, "SPEAKING bytes=%u", unsigned(playback_samples * sizeof(int16_t)));
     for (std::size_t offset = 0; offset < playback_samples; offset += 480) {
         const char control = serial_voice_command();
         dialog.command(control);
         if (control == 'c') return false;
+        if (music_ws && offset % 12000 == 0) {
+            std::size_t length=0;
+            if (!voice_control(music_ws,"music.check",identity) || !read_text(music_ws,buffer,length)) return false;
+            const auto status=read_voice_reply({buffer,length});
+            apply_lamp(status);
+            if (status.type!="music.check") return false;
+            if (!status.music_continue) break;
+        }
         auto* output = playback + offset;
         const std::size_t samples = std::min(std::size_t(480), playback_samples - offset);
 #if CONFIG_PIXELPET_NETWORK_AUDIO_CONFIRMED
@@ -378,6 +392,7 @@ bool reminder_poll(esp_transport_handle_t ws, char* buffer, VoiceSession& remind
     std::size_t length = 0;
     if (!voice_control(ws, "reminder.poll") || !read_text(ws, buffer, length)) return false;
     const auto reply = read_voice_reply({buffer, length});
+    apply_lamp(reply);
     return reply.type == "reminder.none" ||
            (reply.type == "reminder.ready" && reminder.set(reply.session));
 }
@@ -392,6 +407,7 @@ bool play_reminder(esp_transport_handle_t ws, char* buffer, const VoiceSession& 
     if (start.type == "reminder.none") return true;
     if (start.type != "playback.start" || start.session != reminder.text.data() ||
         !start.pcm_output || !start.bytes || start.bytes % 2 || start.bytes > 120 * 48000) return false;
+    apply_lamp(start);
     const auto total = start.bytes;
     std::unique_ptr<int16_t, decltype(&heap_caps_free)> pcm(
         static_cast<int16_t*>(heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), heap_caps_free);
@@ -413,7 +429,7 @@ bool play_reminder(esp_transport_handle_t ws, char* buffer, const VoiceSession& 
     if (offset != total || !read_text(ws, buffer, length)) return false;
     const auto end = read_voice_reply({buffer, length});
     if (end.type != "playback.end" || end.session != reminder.text.data()) return false;
-    if (!play_buffered(pcm.get(), total / sizeof(int16_t), buffer, dialog)) return false;
+    if (!play_buffered(pcm.get(), total / sizeof(int16_t), buffer, dialog, start.music ? ws : nullptr, reminder.text.data())) return false;
     ESP_LOGI(TAG, "REMINDER_PLAYED");
     return voice_control(ws, "reminder.ack", reminder.text.data()) &&
            read_text(ws, buffer, length) && read_voice_reply({buffer, length}).type == "reminder.ack";
@@ -561,6 +577,7 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
     auto deadline = milliseconds() + 100000;
     auto heartbeat_at = milliseconds() + HEARTBEAT_MS;
     bool playing = false;
+    bool played_segment = false;
     uint32_t remaining = 0;
     std::size_t playback_samples = 0;
     std::size_t buffered_samples = 0;
@@ -629,7 +646,8 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
             if (!reply.bytes || reply.bytes % 2 || reply.bytes > 120 * 48000 ||
                 (!reply.conversation.empty() && !conversation.set(reply.conversation)) ||
                 (reply.conversation.empty() && !checking_wake)) return false;
-            if (!turn.play()) return false;
+            if (!played_segment && !turn.play()) return false;
+            apply_lamp(reply);
             remaining = reply.bytes;
             playback_samples = remaining / sizeof(int16_t);
             playback.reset(static_cast<int16_t*>(heap_caps_malloc(remaining, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
@@ -644,7 +662,13 @@ bool voice_turn(esp_transport_handle_t ws, char* buffer, TouchGesture& touch, Vo
             if (buffered_samples != playback_samples) return false;
             if (!play_buffered(playback.get(), playback_samples, buffer, dialog)) return false;
             ESP_LOGI(TAG, "PLAYBACK_COMPLETE frames=%lu", static_cast<unsigned long>(seq));
-            return true;
+            if (!reply.more) return true;
+            played_segment = true;
+            playing = false;
+            buffered_samples = 0;
+            seq = 0;
+            playback.reset();
+            deadline = milliseconds() + 45000;
         }
     }
     return false;
@@ -654,7 +678,7 @@ void run_voice_session(const NetworkSettings& settings, const char* path, char* 
                        VoiceSession& conversation, DialogControl& dialog) {
     Socket socket;
     size_t length = 0;
-    char hello[] = R"({"version":1,"type":"hello","client":"esp32","reminders":true})";
+    char hello[] = R"({"version":1,"type":"hello","client":"esp32","reminders":true,"home_control":true,"firmware_version":"1.3.0-dev.3","segmented_reply":true})";
     if (!socket.connect(settings, path) ||
         !send_voice(socket.ws, WS_TRANSPORT_OPCODES_TEXT, hello, sizeof(hello) - 1) ||
         !read_text(socket.ws, buffer, length) || read_voice_reply({buffer, length}).type != "hello") return;
@@ -670,6 +694,9 @@ void run_voice_session(const NetworkSettings& settings, const char* path, char* 
         if (command == 'r' || dialog.enabled() || (touch_event && !pressed)) {
             const auto trigger = dialog.enabled() ? VoiceTrigger::Continuous : VoiceTrigger::Automatic;
             if (!voice_turn(socket.ws, buffer, touch, conversation, trigger, dialog)) return;
+            VoiceSession reminder;
+            if (!reminder_poll(socket.ws, buffer, reminder) ||
+                (reminder.text[0] && !play_reminder(socket.ws, buffer, reminder, dialog))) return;
             if (dialog.enabled()) {
                 ESP_LOGI(TAG, "NEXT_TURN: %s", dialog.standby() ? "standby local wake detection" : "continuing the same conversation");
                 vTaskDelay(pdMS_TO_TICKS(100));

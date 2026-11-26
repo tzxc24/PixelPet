@@ -28,6 +28,8 @@ class ModelReply(BaseModel):
     emotion: Emotion
     action: Action
     dialog_state: Literal['active','standby'] = 'active'
+    followup_topic: Literal["sleep", "pain", "digestion", "breathing", "skin", "mood", "other"] | None = None
+    followup_summary: str = Field(default="", max_length=100)
     memories: list[MemoryInput] = Field(default_factory=list, max_length=8)
 
     @field_validator("reply")

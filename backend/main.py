@@ -26,6 +26,8 @@ from backend.preferences import PreferencesService,ReminderScheduler
 from backend.events import EventBus
 from backend.pet import PetEngine
 from backend.devices import DeviceService
+from backend.devices.home import HomeControl
+from backend.api.home import router as home_router
 from backend.access import LocalAccessMiddleware, parse_allowed_hosts
 
 
@@ -47,6 +49,7 @@ def create_app(database_path: Path | None = None, settings: Settings | None = No
             application.state.store = Store(application.state.engine,settings.memory_decay_days)
             application.state.preferences=PreferencesService(application.state.engine, default_model=settings.llm_model)
             application.state.scheduler=ReminderScheduler(application.state.preferences)
+            application.state.home=HomeControl(application.state.preferences, ROOT / 'assets' / 'music')
             application.state.event_bus=EventBus()
             application.state.pet_engine=PetEngine(application.state.event_bus)
             application.state.pet_engine.preferences=application.state.preferences
@@ -76,6 +79,7 @@ def create_app(database_path: Path | None = None, settings: Settings | None = No
     application.include_router(assets_router)
     application.include_router(audio_router)
     application.include_router(devices_router)
+    application.include_router(home_router)
     application.include_router(diagnostics_router)
     application.mount("/static", StaticFiles(directory=ROOT / "frontend", check_dir=False), name="static")
 

@@ -21,6 +21,9 @@ struct VoiceReply {
     bool pcm_output = false;
     std::string_view dialog_state;
     std::string_view error_code;
+    uint32_t lamp_revision = 0, lamp_level = 0, lamp_seconds = 3;
+    std::string_view lamp_mode;
+    bool music = false, music_continue = false, more = false;
 };
 VoiceReply read_voice_reply(std::string_view json);
 }

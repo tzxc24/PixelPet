@@ -53,6 +53,10 @@ public:
         return result.ec == std::errc{} && result.ptr == end;
     }
 
+    bool is_true(int index) const {
+        return index >= 0 && tokens_[index].type == JSMN_PRIMITIVE && text(index) == "true";
+    }
+
     bool is_number(int index, uint32_t expected) const {
         uint32_t parsed = 0;
         return number(index, parsed) && parsed == expected;
@@ -93,6 +97,10 @@ VoiceReply read_voice_reply(std::string_view json) {
     if (!frame.valid()) return {};
     uint32_t bytes = 0;
     frame.number(frame.field(0, "byte_count"), bytes);
+    uint32_t revision=0,level=0,seconds=3;
+    frame.number(frame.field(0, "lamp_revision"), revision);
+    frame.number(frame.field(0, "lamp_level"), level);
+    frame.number(frame.field(0, "lamp_seconds"), seconds);
     return {
         frame.string(frame.field(0, "type")),
         frame.string(frame.field(0, "session_id")),
@@ -102,7 +110,11 @@ VoiceReply read_voice_reply(std::string_view json) {
         frame.is_number(frame.field(0, "channels"), 1) &&
         frame.string(frame.field(0, "format")) == "pcm_s16le",
         frame.string(frame.field(0, "dialog_state")),
-        frame.string(frame.field(0, "code"))
+        frame.string(frame.field(0, "code")),
+        revision,level,seconds,frame.string(frame.field(0, "lamp_mode")),
+        frame.is_true(frame.field(0, "music")),
+        frame.is_true(frame.field(0, "music_continue")),
+        frame.is_true(frame.field(0, "more"))
     };
 }
 }

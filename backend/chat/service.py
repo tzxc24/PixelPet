@@ -4,7 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -91,8 +91,17 @@ class ChatService:
             if getattr(self,'preferences',None) is not None:
                 preferences=self.preferences.get()
                 identity='\n当前名字与性格设置（仅描述角色）：'+json.dumps({'name':preferences.name,'personality':preferences.personality},ensure_ascii=False)
-            voice_style = ("\n当前为实时语音对话。先直接回应主人的问题，再讲清楚必要的背景、原因、步骤或例子。内容的长短由问题和主人的要求决定，讲到意思完整为止。主人要听故事、睡前故事、童话或寓言时，完整讲述。没指定篇目时，优先选一则中国寓言（如守株待兔、刻舟求剑、井底之蛙、狐假虎威），同一段对话尽量不重复。用自然中文讲一则完整的故事，有人物、起因、经过和结局，加入适量对话和具体细节；睡前语气温和，可以用一句话自然收尾。指定了篇目或长度就按主人的要求讲。" if spoken else "")
-            prompt=[{"role":"system","content":self.system+identity+voice_style+"\n\nMEMORY_DATA:"+json.dumps(data,ensure_ascii=False)}]+context+[{"role":"user","content":message}]
+            voice_style = ("\n当前为实时语音对话。简单问题优先用一两句直接回答。复杂问题再讲清楚必要的背景、原因、步骤或例子。内容的长短由问题和主人的要求决定，讲到意思完整为止。主人要听故事、睡前故事、童话或寓言时，完整讲述。没指定篇目时，优先选一则中国寓言（如守株待兔、刻舟求剑、井底之蛙、狐假虎威），同一段对话尽量不重复。用自然中文讲一则完整的故事，有人物、起因、经过和结局，加入适量对话和具体细节；睡前语气温和，可以用一句话自然收尾。指定了篇目或长度就按主人的要求讲。" if spoken else "")
+            followup_instruction = ""
+            if getattr(self, 'preferences', None) and self.preferences.read_json(self.FOLLOWUP_KEY, {}).get('enabled', True):
+                followup_instruction = (
+                    "\n按本轮用户原话判断健康回访。只有用户明确在描述自己当前、仍在发生的健康困扰，"
+                    "才附加 followup_topic（sleep、pain、digestion、breathing、skin、mood 或 other）"
+                    "和 followup_summary（一句自然、简短的中文概括，不超过60字）。"
+                    "泛知识问题、他人的情况、已经好转或结束的问题不填。摘要只概括用户所述现象，"
+                    "省略可识别身份和具体用药信息，不推断病因、不补诊断、不生成时间。"
+                )
+            prompt=[{"role":"system","content":self.system+identity+voice_style+followup_instruction+"\n\nMEMORY_DATA:"+json.dumps(data,ensure_ascii=False)}]+context+[{"role":"user","content":message}]
             if sum(len(item['content']) for item in prompt)>self.settings.llm_history_max_chars:
                 raise LLMError('history_too_large','完整历史超过本机发送上限，本条消息已保存；未裁剪历史，也未发送模型。请先导出整理历史，或调整 LLM_HISTORY_MAX_CHARS。',413)
             self.last_context={'mode':'all_stored_sessions','history_messages':len(context),
@@ -113,8 +122,10 @@ class ChatService:
                 turn.active=False
 
     def clock_reply(self, message):
-        query = re.sub(r'[\s，。？！、,.?!]+', '', message)
-        if not re.fullmatch(r'(?:小[星心])?(?:请问|你知道)?(?:现在|此刻)?(?:是)?(?:几点(?:钟)?|什么时间)(?:了|吗)?', query):
+        # ASR can append later speech after an explicit, complete clock question.
+        first_question = re.split(r'[？?。！!]', message, maxsplit=1)[0]
+        query = re.sub(r'[\s，、,]+', '', first_question)
+        if not re.fullmatch(r'(?:小[星心])?(?:请问|能(?:不能)?告诉我|告诉我|你知道|帮我看(?:看|一下)?)?(?:现在|此刻)?(?:是)?(?:北京时间)?(?:几点(?:钟)?|什么时间)(?:了)?(?:吗|啊|呀|呢)?', query):
             return None
         preferences = self.preferences.get() if getattr(self, 'preferences', None) else None
         now = datetime.now(ZoneInfo(preferences.time_zone if preferences else 'Asia/Shanghai'))
@@ -124,10 +135,55 @@ class ChatService:
         minute = f'{now.minute:02d}分' if now.minute else '整'
         return ModelReply(reply=f'现在是{hour}{minute}。', emotion='normal', action='speak')
 
+    FOLLOWUP_KEY = 'health-followup.v1'
+
+    def followup_control(self, message):
+        preferences = getattr(self, 'preferences', None)
+        if preferences is None:
+            return None
+        command = re.sub(r'[\s，。？！、,.?!]+', '', message)
+        if command not in ('开启健康回访', '关闭健康回访', '取消健康回访'):
+            return None
+        def update(state):
+            if command == '开启健康回访':
+                state['enabled'] = True
+            else:
+                state['tasks'].clear()
+                if command == '关闭健康回访':
+                    state['enabled'] = False
+        preferences.mutate_json(self.FOLLOWUP_KEY, {'enabled': True, 'tasks': {}}, update)
+        reply = {'开启健康回访': '健康回访已开启。', '关闭健康回访': '健康回访已关闭。',
+                 '取消健康回访': '待回访事项已取消。'}[command]
+        return ModelReply(reply=reply, emotion='normal', action='speak')
+
+    def apply_followup(self, result):
+        preferences = getattr(self, 'preferences', None)
+        if preferences is None or not preferences.read_json(self.FOLLOWUP_KEY, {}).get('enabled', True):
+            return result
+        now = datetime.now(timezone.utc)
+        def update(state):
+            if not state['enabled']:
+                return None
+            tasks = state['tasks']
+            due = min((key for key, item in tasks.items() if item['due'] <= now.isoformat()),
+                      key=lambda key: tasks[key]['due'], default=None)
+            previous = tasks.pop(due)['summary'] if due else None
+            summary = ' '.join(result.followup_summary.split()).rstrip('。？！')
+            if result.followup_topic and summary and result.followup_topic != due:
+                tasks.setdefault(result.followup_topic, {'summary': summary, 'due': (now + timedelta(days=3)).isoformat()})
+                tasks[result.followup_topic]['summary'] = summary
+            return previous
+        prior = preferences.mutate_json(self.FOLLOWUP_KEY, {'enabled': True, 'tasks': {}}, update)
+        if prior:
+            suffix = f'还有，你上次提到{prior}。现在怎么样了？'
+            return result.model_copy(update={'reply': result.reply[:6000-len(suffix)] + suffix})
+        return result
+
     async def events(self,turn,streaming=True):
         raw,emitted="",""
         started=time.monotonic();first_token=None
-        clock_reply = self.clock_reply(turn.message)
+        control_reply = self.followup_control(turn.message)
+        clock_reply = control_reply or self.clock_reply(turn.message)
         async def once():
             if clock_reply is not None:
                 yield clock_reply.model_dump_json()
@@ -173,6 +229,11 @@ class ChatService:
             for memory in result.memories:
                 if memory.importance>=.7 and grounded(memory.content,turn.message):
                     self.store.upsert_memory(**memory.model_dump(),source=f"model:{turn.cid}:{turn.mid}")
+            if clock_reply is None:
+                updated = self.apply_followup(result)
+                if updated.reply != result.reply and updated.reply.startswith(emitted):
+                    yield 'delta', {'text': updated.reply[len(emitted):]}
+                result = updated
             message_id=self.store.finish_message(turn.cid,turn.mid,result,self.provider.mode)
             self.last_timing={'llm_first_token_ms':first_token,'llm_total_ms':round((time.monotonic()-started)*1000)}
             engine=getattr(self,'pet_engine',None)

@@ -1,6 +1,8 @@
 #include "hardware_smoke.h"
 #include "network.h"
+#include "lamp.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -38,9 +40,11 @@ static void network_task(void*) {
 }
 
 extern "C" void app_main() {
+    ESP_LOGI("pixelpet", "Reset reason=%d", int(esp_reset_reason()));
+    pixelpet::lamp_init();
 #if CONFIG_PIXELPET_BOOT_NETWORK || CONFIG_PIXELPET_BOOT_WIFI
     // Leave headroom for TLS handshakes and bounded server-frame parsing.
-    if (xTaskCreate(network_task, "pixelpet_net", 12288, nullptr, 4, nullptr) != pdPASS) {
+    if (xTaskCreate(network_task, "pixelpet_net", 20480, nullptr, 4, nullptr) != pdPASS) {
         ESP_LOGE("pixelpet", "Network task allocation failed");
     }
 #else
